@@ -299,6 +299,18 @@ struct BlockBasedTableOptions {
   // should be through the Cache object, e.g. Cache::SetCapacity().
   std::shared_ptr<Cache> block_cache = nullptr;
 
+  //project2
+  // V4-lite Ridge admission gate for data-block cache insert.
+  bool enable_v4_lite_ridge_admission = false;
+
+  // Offline-selected threshold.
+  double v4_lite_ridge_threshold = 4.979705;
+
+  // Match training-side HISTORY_WINDOW.
+  uint32_t v4_lite_history_window = 10000;
+  //project2
+
+
   // If non-NULL use the specified cache for pages read from device
   // IF NULL, no page cache is used
   std::shared_ptr<PersistentCache> persistent_cache = nullptr;

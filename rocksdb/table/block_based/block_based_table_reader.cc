@@ -18,7 +18,6 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
-
 #include "block_cache.h"
 #include "cache/cache_entry_roles.h"
 #include "cache/cache_key.h"
@@ -75,6 +74,10 @@
 #include "util/crc32c.h"
 #include "util/stop_watch.h"
 #include "util/string_util.h"
+
+//project2
+#include <type_traits>
+//project2
 
 namespace ROCKSDB_NAMESPACE {
 namespace {
@@ -956,6 +959,16 @@ Status BlockBasedTable::Open(
   SetupBaseCacheKey(rep->table_properties.get(), cur_db_session_id,
                     cur_file_num, &rep->base_cache_key);
 
+  //project2
+  rep->v4_lite_file_number = cur_file_num;
+  if (rep->table_options.enable_v4_lite_ridge_admission) {
+    rep->v4_lite_ridge_runtime =
+        std::make_unique<V4LiteRidgeAdmissionRuntime>(
+            rep->table_options.v4_lite_history_window,
+            rep->table_options.v4_lite_ridge_threshold);
+  }
+  //project2
+
   rep->persistent_cache_options =
       PersistentCacheOptions(rep->table_options.persistent_cache,
                              rep->base_cache_key, rep->ioptions.stats);
@@ -1764,8 +1777,41 @@ BlockBasedTable::MaybeReadBlockAndLoadToCache(
     GetContext* get_context, BlockCacheLookupContext* lookup_context,
     BlockContents* contents, bool async_read,
     bool use_block_cache_for_lookup) const {
+
+  //project2
+  // assert(out_parsed_block != nullptr);
+  // const bool no_io = (ro.read_tier == kBlockCacheTier);
   assert(out_parsed_block != nullptr);
-  const bool no_io = (ro.read_tier == kBlockCacheTier);
+
+  ReadOptions gate_ro = ro;
+
+  if (std::is_same<TBlocklike, Block_kData>::value &&
+      gate_ro.fill_cache &&
+      rep_->table_options.enable_v4_lite_ridge_admission &&
+      rep_->v4_lite_ridge_runtime != nullptr &&
+      get_context != nullptr &&
+      !for_compaction) {
+    const Slice& ukey = get_context->ukey_to_get_blob_value();
+    const uint64_t tracing_get_id = get_context->get_tracing_get_id();
+
+    V4LiteRidgeFeatures feats;
+    const bool admit = rep_->v4_lite_ridge_runtime->ShouldAdmit(
+        rep_->v4_lite_file_number,
+        rep_->level,
+        handle.offset(),
+        handle.size(),
+        ukey,
+        tracing_get_id,
+        &feats);
+
+    if (!admit) {
+      gate_ro.fill_cache = false;
+    }
+      }
+
+  const bool no_io = (gate_ro.read_tier == kBlockCacheTier);
+  //project2
+
   BlockCacheInterface<TBlocklike> block_cache{
       rep_->table_options.block_cache.get()};
   // First, try to get the block from the cache
@@ -1808,7 +1854,7 @@ BlockBasedTable::MaybeReadBlockAndLoadToCache(
     // file.
     if (out_parsed_block->GetValue() == nullptr &&
         out_parsed_block->GetCacheHandle() == nullptr && !no_io &&
-        ro.fill_cache) {
+        gate_ro.fill_cache) {
       Statistics* statistics = rep_->ioptions.stats;
       const bool maybe_compressed =
           BlockTypeMaybeCompressed(TBlocklike::kBlockType) &&
@@ -1834,7 +1880,7 @@ BlockBasedTable::MaybeReadBlockAndLoadToCache(
         // It would also cause a memory allocation to be used rather than
         // stack if the compressed block size is < 5KB
         BlockFetcher block_fetcher(
-            rep_->file.get(), prefetch_buffer, rep_->footer, ro, handle,
+            rep_->file.get(), prefetch_buffer, rep_->footer, gate_ro, handle,
             &tmp_contents, rep_->ioptions, do_uncompress, maybe_compressed,
             TBlocklike::kBlockType, decomp, rep_->persistent_cache_options,
             GetMemoryAllocator(rep_->table_options),
@@ -1910,7 +1956,7 @@ BlockBasedTable::MaybeReadBlockAndLoadToCache(
   if (block_cache_tracer_ && block_cache_tracer_->is_tracing_enabled() &&
       lookup_context) {
     SaveLookupContextOrTraceRecord(
-        key, is_cache_hit, ro, out_parsed_block->GetValue(), lookup_context);
+        key, is_cache_hit, gate_ro, out_parsed_block->GetValue(), lookup_context);
   }
 
   assert(s.ok() || out_parsed_block->GetValue() == nullptr);

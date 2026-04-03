@@ -639,6 +639,17 @@ DEFINE_int64(simcache_size, -1,
 DEFINE_bool(cache_index_and_filter_blocks, false,
             "Cache index/filter blocks in block cache.");
 
+//project2
+DEFINE_bool(enable_v4_lite_ridge_admission, false,
+            "Enable V4-lite Ridge admission gate for data-block cache insert.");
+
+DEFINE_double(v4_lite_ridge_threshold, 4.979705,
+              "Admission threshold for V4-lite Ridge score.");
+
+DEFINE_uint32(v4_lite_history_window, 10000,
+              "History window used by V4-lite Ridge online features.");
+//project2
+
 DEFINE_bool(use_cache_jemalloc_no_dump_allocator, false,
             "Use JemallocNodumpAllocator for block/blob cache.");
 
@@ -4481,6 +4492,16 @@ class Benchmark {
       if (cache_ == nullptr) {
         block_based_options.no_block_cache = true;
       }
+
+      //project2
+      block_based_options.enable_v4_lite_ridge_admission =
+    FLAGS_enable_v4_lite_ridge_admission;
+      block_based_options.v4_lite_ridge_threshold =
+          FLAGS_v4_lite_ridge_threshold;
+      block_based_options.v4_lite_history_window =
+          FLAGS_v4_lite_history_window;
+      //project2
+
       block_based_options.cache_index_and_filter_blocks =
           FLAGS_cache_index_and_filter_blocks;
       block_based_options.pin_l0_filter_and_index_blocks_in_cache =

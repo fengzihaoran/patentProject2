@@ -38,6 +38,10 @@
 #include "util/coro_utils.h"
 #include "util/hash_containers.h"
 
+//project2
+#include "table/block_based/v4_lite_ridge_admission.h"
+//project2
+
 namespace ROCKSDB_NAMESPACE {
 
 class Cache;
@@ -650,6 +654,11 @@ struct BlockBasedTable::Rep {
 
   // Context for block cache CreateCallback
   BlockCreateContext create_context;
+
+  //project2
+  std::unique_ptr<V4LiteRidgeAdmissionRuntime> v4_lite_ridge_runtime;
+  uint64_t v4_lite_file_number = 0;
+  //project2
 
   // If global_seqno is used, all Keys in this file will have the same
   // seqno with value `global_seqno`.
