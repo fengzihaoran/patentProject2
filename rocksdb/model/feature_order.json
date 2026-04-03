@@ -1,0 +1,13 @@
+[
+  "block_size",
+  "num_keys_in_block",
+  "recent_get_key_freq_hist",
+  "last_get_key_gap",
+  "recent_sst_freq_hist",
+  "recent_sst_miss_freq_hist",
+  "same_get_num_blocks",
+  "same_get_num_data_blocks",
+  "is_l0",
+  "offset_bucket",
+  "keys_density"
+]

@@ -1,0 +1,28 @@
+{
+  "best_alpha": 0.01,
+  "selection_score": 0.022580676094027335,
+  "feature_cols": [
+    "block_size",
+    "num_keys_in_block",
+    "recent_get_key_freq_hist",
+    "last_get_key_gap",
+    "recent_sst_freq_hist",
+    "recent_sst_miss_freq_hist",
+    "same_get_num_blocks",
+    "same_get_num_data_blocks",
+    "is_l0",
+    "offset_bucket",
+    "keys_density"
+  ],
+  "test_regression": {
+    "rmse": 0.14489975765455396,
+    "mae": 0.08142323584684538,
+    "r2": 0.7159214346339655,
+    "spearman": 0.6969980635546096,
+    "pearson": 0.8687202618986805
+  },
+  "train_size": 386626,
+  "val_size": 82849,
+  "test_size": 82849,
+  "trainval_size": 469475
+}
