@@ -77,6 +77,7 @@
 
 //project2
 #include <type_traits>
+#include <mutex>
 //project2
 
 namespace ROCKSDB_NAMESPACE {
@@ -87,6 +88,19 @@ CacheAllocationPtr CopyBufferToHeap(MemoryAllocator* allocator, Slice& buf) {
   heap_buf = AllocateBlock(buf.size(), allocator);
   memcpy(heap_buf.get(), buf.data(), buf.size());
   return heap_buf;
+}
+
+std::shared_ptr<V4LiteRidgeAdmissionRuntime> GetSharedV4LiteRuntime(
+    uint32_t history_window, double threshold) {
+  static std::mutex mu;
+  static std::shared_ptr<V4LiteRidgeAdmissionRuntime> runtime;
+
+  std::lock_guard<std::mutex> lg(mu);
+  if (!runtime) {
+    runtime = std::make_shared<V4LiteRidgeAdmissionRuntime>(history_window,
+                                                            threshold);
+  }
+  return runtime;
 }
 }  // namespace
 
@@ -962,10 +976,9 @@ Status BlockBasedTable::Open(
   //project2
   rep->v4_lite_file_number = cur_file_num;
   if (rep->table_options.enable_v4_lite_ridge_admission) {
-    rep->v4_lite_ridge_runtime =
-        std::make_unique<V4LiteRidgeAdmissionRuntime>(
-            rep->table_options.v4_lite_history_window,
-            rep->table_options.v4_lite_ridge_threshold);
+    rep->v4_lite_ridge_runtime = GetSharedV4LiteRuntime(
+        rep->table_options.v4_lite_history_window,
+        rep->table_options.v4_lite_ridge_threshold);
   }
   //project2
 

@@ -656,7 +656,7 @@ struct BlockBasedTable::Rep {
   BlockCreateContext create_context;
 
   //project2
-  std::unique_ptr<V4LiteRidgeAdmissionRuntime> v4_lite_ridge_runtime;
+  std::shared_ptr<V4LiteRidgeAdmissionRuntime> v4_lite_ridge_runtime;
   uint64_t v4_lite_file_number = 0;
   //project2
 
