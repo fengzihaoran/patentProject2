@@ -101,6 +101,12 @@
 #include <io.h>  // open/close
 #endif
 
+//project2
+#include <chrono>
+#include <fstream>
+#include "rocksdb/listener.h"
+//project2
+
 using GFLAGS_NAMESPACE::ParseCommandLineFlags;
 using GFLAGS_NAMESPACE::RegisterFlagValidator;
 using GFLAGS_NAMESPACE::SetUsageMessage;
@@ -648,6 +654,18 @@ DEFINE_double(v4_lite_ridge_threshold, 4.979705,
 
 DEFINE_uint32(v4_lite_history_window, 10000,
               "History window used by V4-lite Ridge online features.");
+
+DEFINE_string(
+    cache_admission_snapshot_file, "",
+    "If non-empty, periodically dump RocksDB/LSM state snapshots to this CSV.");
+
+DEFINE_uint32(
+    cache_admission_snapshot_interval_sec, 1,
+    "Snapshot sampling period in seconds for cache-admission dataset collection.");
+
+DEFINE_string(
+    cache_admission_sst_trace_file, "",
+    "If non-empty, dump flush/compaction lineage events to this TSV.");
 //project2
 
 DEFINE_bool(use_cache_jemalloc_no_dump_allocator, false,
@@ -1905,6 +1923,246 @@ static enum DistributionType StringToDistributionType(const char* ctype) {
   db_bench_exit(1);
 }
 
+// project2
+class CacheAdmissionSstTraceListener : public ROCKSDB_NAMESPACE::EventListener {
+ public:
+  explicit CacheAdmissionSstTraceListener(const std::string& path)
+      : out_(path, std::ios::out | std::ios::trunc) {
+    if (out_.is_open()) {
+      out_ << "event\tts_us\tcf_name\tjob_id\tinput_file_infos\toutput_file_infos\n";
+    }
+  }
+
+  void OnFlushCompleted(ROCKSDB_NAMESPACE::DB* /*db*/,
+                        const ROCKSDB_NAMESPACE::FlushJobInfo& info) override {
+    std::lock_guard<std::mutex> lg(mu_);
+    if (!out_.is_open()) return;
+    uint64_t ts_us =
+        static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count());
+
+    out_ << "flush"
+         << '\t' << ts_us
+         << '\t' << info.cf_name
+         << '\t' << info.job_id
+         << '\t' << ""
+         << '\t' << FormatSingleOutputFile(info.file_number)
+         << '\n';
+  }
+
+  void OnCompactionCompleted(
+      ROCKSDB_NAMESPACE::DB* /*db*/,
+      const ROCKSDB_NAMESPACE::CompactionJobInfo& info) override {
+    std::lock_guard<std::mutex> lg(mu_);
+    if (!out_.is_open()) return;
+    uint64_t ts_us =
+        static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count());
+
+    out_ << "compaction"
+         << '\t' << ts_us
+         << '\t' << info.cf_name
+         << '\t' << info.job_id
+         << '\t' << FormatInputFiles(info)
+         << '\t' << FormatOutputFiles(info)
+         << '\n';
+  }
+
+ private:
+  static std::string FormatSingleOutputFile(uint64_t file_number) {
+    return "0:" + std::to_string(file_number);
+  }
+
+  static bool TryExtractFileNumber(const std::string& file_name,
+                                   uint64_t* file_number) {
+    if (file_number == nullptr) return false;
+
+    std::string base = file_name;
+    auto slash = base.find_last_of("/\\");
+    if (slash != std::string::npos) {
+      base = base.substr(slash + 1);
+    }
+
+    auto dot = base.find('.');
+    std::string stem = (dot == std::string::npos) ? base : base.substr(0, dot);
+    if (stem.empty()) return false;
+
+    uint64_t v = 0;
+    for (char c : stem) {
+      if (c < '0' || c > '9') {
+        return false;
+      }
+      v = v * 10 + static_cast<uint64_t>(c - '0');
+    }
+    *file_number = v;
+    return true;
+  }
+
+  static std::string FormatInputFiles(
+      const ROCKSDB_NAMESPACE::CompactionJobInfo& info) {
+    std::string s;
+    for (size_t i = 0; i < info.input_files.size(); ++i) {
+      uint64_t file_number = 0;
+      if (!TryExtractFileNumber(info.input_files[i], &file_number)) {
+        continue;
+      }
+      if (!s.empty()) s += ";";
+      s += std::to_string(info.base_input_level);
+      s += ":";
+      s += std::to_string(file_number);
+    }
+    return s;
+  }
+
+  static std::string FormatOutputFiles(
+      const ROCKSDB_NAMESPACE::CompactionJobInfo& info) {
+    std::string s;
+    for (size_t i = 0; i < info.output_files.size(); ++i) {
+      uint64_t file_number = 0;
+      if (!TryExtractFileNumber(info.output_files[i], &file_number)) {
+        continue;
+      }
+      if (!s.empty()) s += ";";
+      s += std::to_string(info.output_level);
+      s += ":";
+      s += std::to_string(file_number);
+    }
+    return s;
+  }
+
+  std::mutex mu_;
+  std::ofstream out_;
+};
+
+class PeriodicSnapshotDumper {
+ public:
+  PeriodicSnapshotDumper(ROCKSDB_NAMESPACE::DB* db,
+                         std::shared_ptr<ROCKSDB_NAMESPACE::Cache> block_cache,
+                         const std::string& path,
+                         uint32_t interval_sec)
+      : db_(db),
+        block_cache_(std::move(block_cache)),
+        path_(path),
+        interval_sec_(interval_sec),
+        stop_(false) {}
+
+  void Start() {
+    out_.open(path_, std::ios::out | std::ios::trunc);
+    out_ << "ts_us,"
+         << "l0_files,l1_files,l2_files,l3_files,"
+         << "estimate_pending_compaction_bytes,"
+         << "num_running_compactions,"
+         << "num_running_flushes,"
+         << "cur_size_all_mem_tables,"
+         << "size_all_mem_tables,"
+         << "block_cache_capacity,"
+         << "block_cache_usage,"
+         << "block_cache_pinned_usage\n";
+
+    th_ = std::thread([this]() { Run(); });
+  }
+
+  void Stop() {
+    stop_.store(true, std::memory_order_relaxed);
+    if (th_.joinable()) th_.join();
+    if (out_.is_open()) out_.close();
+  }
+
+ private:
+  static uint64_t NowMicros() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+  }
+
+  uint64_t GetUint64Property(const std::string& name) {
+    uint64_t v = 0;
+    if (!db_->GetIntProperty(name, &v)) return 0;
+    return v;
+  }
+
+  uint64_t GetUint64StringProperty(const std::string& name) {
+    std::string value;
+    if (!db_->GetProperty(name, &value)) return 0;
+    if (value.empty()) return 0;
+    char* end = nullptr;
+    uint64_t parsed = std::strtoull(value.c_str(), &end, 10);
+    if (end == value.c_str()) return 0;
+    return parsed;
+  }
+
+  void Run() {
+    while (!stop_.load(std::memory_order_relaxed)) {
+      uint64_t ts_us = NowMicros();
+
+      uint64_t l0_files =
+          GetUint64StringProperty("rocksdb.num-files-at-level0");
+      uint64_t l1_files =
+          GetUint64StringProperty("rocksdb.num-files-at-level1");
+      uint64_t l2_files =
+          GetUint64StringProperty("rocksdb.num-files-at-level2");
+      uint64_t l3_files =
+          GetUint64StringProperty("rocksdb.num-files-at-level3");
+
+      uint64_t pending_compaction_bytes =
+          GetUint64Property("rocksdb.estimate-pending-compaction-bytes");
+      uint64_t running_compactions =
+          GetUint64Property("rocksdb.num-running-compactions");
+      uint64_t running_flushes =
+          GetUint64Property("rocksdb.num-running-flushes");
+      uint64_t cur_mem =
+          GetUint64Property("rocksdb.cur-size-all-mem-tables");
+      uint64_t all_mem =
+          GetUint64Property("rocksdb.size-all-mem-tables");
+
+      size_t cache_capacity = 0;
+      size_t cache_usage = 0;
+      size_t cache_pinned = 0;
+      if (block_cache_) {
+        cache_capacity = block_cache_->GetCapacity();
+        cache_usage = block_cache_->GetUsage();
+        cache_pinned = block_cache_->GetPinnedUsage();
+      }
+
+      {
+        std::lock_guard<std::mutex> lg(mu_);
+        out_ << ts_us << ","
+             << l0_files << ","
+             << l1_files << ","
+             << l2_files << ","
+             << l3_files << ","
+             << pending_compaction_bytes << ","
+             << running_compactions << ","
+             << running_flushes << ","
+             << cur_mem << ","
+             << all_mem << ","
+             << cache_capacity << ","
+             << cache_usage << ","
+             << cache_pinned << "\n";
+      }
+
+      for (uint32_t i = 0; i < interval_sec_ * 10 && !stop_.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      }
+    }
+  }
+
+  ROCKSDB_NAMESPACE::DB* db_;
+  std::shared_ptr<ROCKSDB_NAMESPACE::Cache> block_cache_;
+  std::string path_;
+  uint32_t interval_sec_;
+  std::atomic<bool> stop_;
+  std::thread th_;
+  std::mutex mu_;
+  std::ofstream out_;
+};
+// project2
+
 class BaseDistribution {
  public:
   BaseDistribution(unsigned int _min, unsigned int _max)
@@ -2790,6 +3048,9 @@ class Duration {
 class Benchmark {
  private:
   std::shared_ptr<Cache> cache_;
+  //project2
+  std::unique_ptr<PeriodicSnapshotDumper> snapshot_dumper_;
+  //project2
   std::shared_ptr<Cache> compressed_cache_;
   std::shared_ptr<const SliceTransform> prefix_extractor_;
   DBWithColumnFamilies db_;
@@ -3366,12 +3627,19 @@ class Benchmark {
     }
   }
 
+  //project2
   void DeleteDBs() {
+    if (snapshot_dumper_) {
+      snapshot_dumper_->Stop();
+      snapshot_dumper_.reset();
+    }
+
     db_.DeleteDBs();
     for (const DBWithColumnFamilies& dbwcf : multi_dbs_) {
       delete dbwcf.db;
     }
   }
+  //project2
 
   ~Benchmark() {
     DeleteDBs();
@@ -5006,6 +5274,14 @@ class Benchmark {
               DBWithColumnFamilies* db) {
     uint64_t open_start = FLAGS_report_open_timing ? FLAGS_env->NowNanos() : 0;
     Status s;
+    // project2
+    if (!FLAGS_cache_admission_sst_trace_file.empty()) {
+      options.listeners.emplace_back(
+          std::make_shared<CacheAdmissionSstTraceListener>(
+              FLAGS_cache_admission_sst_trace_file));
+    }
+    // project2
+
     // Open with column families if necessary.
     if (FLAGS_num_column_families > 1) {
       size_t num_hot = FLAGS_num_column_families;
@@ -5155,6 +5431,21 @@ class Benchmark {
       fprintf(stderr, "open error: %s\n", s.ToString().c_str());
       db_bench_exit(1);
     }
+    //project2
+    if (db == &db_ &&
+    !FLAGS_cache_admission_snapshot_file.empty()) {
+      if (snapshot_dumper_) {
+        snapshot_dumper_->Stop();
+        snapshot_dumper_.reset();
+      }
+      snapshot_dumper_.reset(new PeriodicSnapshotDumper(
+          db->db,
+          cache_,
+          FLAGS_cache_admission_snapshot_file,
+          FLAGS_cache_admission_snapshot_interval_sec));
+      snapshot_dumper_->Start();
+    }
+    //project2
   }
 
   enum WriteMode { RANDOM, SEQUENTIAL, UNIQUE_RANDOM };
