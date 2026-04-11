@@ -105,6 +105,7 @@
 #include <chrono>
 #include <fstream>
 #include "rocksdb/listener.h"
+#include "table/block_based/ml_cache_admission.h"
 //project2
 
 using GFLAGS_NAMESPACE::ParseCommandLineFlags;
@@ -654,6 +655,12 @@ DEFINE_double(v4_lite_ridge_threshold, 4.979705,
 
 DEFINE_uint32(v4_lite_history_window, 10000,
               "History window used by V4-lite Ridge online features.");
+
+DEFINE_bool(enable_ml_cache_admission, false,
+            "Enable online logistic-regression admission gate for data blocks.");
+
+DEFINE_double(ml_cache_admission_threshold, 0.5,
+              "Admission threshold for online logistic-regression probability.");
 
 DEFINE_string(
     cache_admission_snapshot_file, "",
@@ -2051,17 +2058,19 @@ class PeriodicSnapshotDumper {
         stop_(false) {}
 
   void Start() {
-    out_.open(path_, std::ios::out | std::ios::trunc);
-    out_ << "ts_us,"
-         << "l0_files,l1_files,l2_files,l3_files,"
-         << "estimate_pending_compaction_bytes,"
-         << "num_running_compactions,"
-         << "num_running_flushes,"
-         << "cur_size_all_mem_tables,"
-         << "size_all_mem_tables,"
-         << "block_cache_capacity,"
-         << "block_cache_usage,"
-         << "block_cache_pinned_usage\n";
+    if (!path_.empty()) {
+      out_.open(path_, std::ios::out | std::ios::trunc);
+      out_ << "ts_us,"
+           << "l0_files,l1_files,l2_files,l3_files,"
+           << "estimate_pending_compaction_bytes,"
+           << "num_running_compactions,"
+           << "num_running_flushes,"
+           << "cur_size_all_mem_tables,"
+           << "size_all_mem_tables,"
+           << "block_cache_capacity,"
+           << "block_cache_usage,"
+           << "block_cache_pinned_usage\n";
+    }
 
     th_ = std::thread([this]() { Run(); });
   }
@@ -2129,7 +2138,11 @@ class PeriodicSnapshotDumper {
         cache_pinned = block_cache_->GetPinnedUsage();
       }
 
-      {
+      ROCKSDB_NAMESPACE::UpdateOnlineCacheAdmissionSnapshot(
+          l0_files, l1_files, pending_compaction_bytes, running_compactions,
+          running_flushes, cur_mem, cache_usage, cache_pinned);
+
+      if (out_.is_open()) {
         std::lock_guard<std::mutex> lg(mu_);
         out_ << ts_us << ","
              << l0_files << ","
@@ -4768,6 +4781,10 @@ class Benchmark {
           FLAGS_v4_lite_ridge_threshold;
       block_based_options.v4_lite_history_window =
           FLAGS_v4_lite_history_window;
+      block_based_options.enable_ml_cache_admission =
+          FLAGS_enable_ml_cache_admission;
+      block_based_options.ml_cache_admission_threshold =
+          FLAGS_ml_cache_admission_threshold;
       //project2
 
       block_based_options.cache_index_and_filter_blocks =
@@ -5433,7 +5450,8 @@ class Benchmark {
     }
     //project2
     if (db == &db_ &&
-    !FLAGS_cache_admission_snapshot_file.empty()) {
+        (!FLAGS_cache_admission_snapshot_file.empty() ||
+         FLAGS_enable_ml_cache_admission)) {
       if (snapshot_dumper_) {
         snapshot_dumper_->Stop();
         snapshot_dumper_.reset();

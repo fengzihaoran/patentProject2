@@ -308,6 +308,12 @@ struct BlockBasedTableOptions {
 
   // Match training-side HISTORY_WINDOW.
   uint32_t v4_lite_history_window = 10000;
+
+  // Online logistic-regression admission gate for data-block cache insert.
+  bool enable_ml_cache_admission = false;
+
+  // Admit a missed data block only when predicted probability exceeds this.
+  double ml_cache_admission_threshold = 0.5;
   //project2
 
 

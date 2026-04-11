@@ -102,6 +102,17 @@ std::shared_ptr<V4LiteRidgeAdmissionRuntime> GetSharedV4LiteRuntime(
   }
   return runtime;
 }
+
+std::shared_ptr<MLCacheAdmissionRuntime> GetSharedMLCacheAdmissionRuntime() {
+  static std::mutex mu;
+  static std::shared_ptr<MLCacheAdmissionRuntime> runtime;
+
+  std::lock_guard<std::mutex> lg(mu);
+  if (!runtime) {
+    runtime = std::make_shared<MLCacheAdmissionRuntime>();
+  }
+  return runtime;
+}
 }  // namespace
 
 // Explicitly instantiate templates for each "blocklike" type we use (and
@@ -974,7 +985,10 @@ Status BlockBasedTable::Open(
                     cur_file_num, &rep->base_cache_key);
 
   //project2
-  rep->v4_lite_file_number = cur_file_num;
+  rep->admission_file_number = cur_file_num;
+  if (rep->table_options.enable_ml_cache_admission) {
+    rep->ml_cache_admission_runtime = GetSharedMLCacheAdmissionRuntime();
+  }
   if (rep->table_options.enable_v4_lite_ridge_admission) {
     rep->v4_lite_ridge_runtime = GetSharedV4LiteRuntime(
         rep->table_options.v4_lite_history_window,
@@ -1791,39 +1805,10 @@ BlockBasedTable::MaybeReadBlockAndLoadToCache(
     BlockContents* contents, bool async_read,
     bool use_block_cache_for_lookup) const {
 
-  //project2
-  // assert(out_parsed_block != nullptr);
-  // const bool no_io = (ro.read_tier == kBlockCacheTier);
   assert(out_parsed_block != nullptr);
 
   ReadOptions gate_ro = ro;
-
-  if (std::is_same<TBlocklike, Block_kData>::value &&
-      gate_ro.fill_cache &&
-      rep_->table_options.enable_v4_lite_ridge_admission &&
-      rep_->v4_lite_ridge_runtime != nullptr &&
-      get_context != nullptr &&
-      !for_compaction) {
-    const Slice& ukey = get_context->ukey_to_get_blob_value();
-    const uint64_t tracing_get_id = get_context->get_tracing_get_id();
-
-    V4LiteRidgeFeatures feats;
-    const bool admit = rep_->v4_lite_ridge_runtime->ShouldAdmit(
-        rep_->v4_lite_file_number,
-        rep_->level,
-        handle.offset(),
-        handle.size(),
-        ukey,
-        tracing_get_id,
-        &feats);
-
-    if (!admit) {
-      gate_ro.fill_cache = false;
-    }
-      }
-
   const bool no_io = (gate_ro.read_tier == kBlockCacheTier);
-  //project2
 
   BlockCacheInterface<TBlocklike> block_cache{
       rep_->table_options.block_cache.get()};
@@ -1859,6 +1844,32 @@ BlockBasedTable::MaybeReadBlockAndLoadToCache(
                 handle.offset(), BlockSizeWithTrailer(handle),
                 ro.adaptive_readahead /*decrease_readahead_size*/);
           }
+        }
+      }
+    }
+
+    if (std::is_same<TBlocklike, Block_kData>::value &&
+        !is_cache_hit && gate_ro.fill_cache && !no_io && get_context != nullptr &&
+        !for_compaction) {
+      if (rep_->table_options.enable_ml_cache_admission &&
+          rep_->ml_cache_admission_runtime != nullptr) {
+        const bool admit = rep_->ml_cache_admission_runtime->ShouldAdmit(
+            handle.size(), rep_->level,
+            rep_->table_options.ml_cache_admission_threshold);
+        if (!admit) {
+          gate_ro.fill_cache = false;
+        }
+      } else if (rep_->table_options.enable_v4_lite_ridge_admission &&
+                 rep_->v4_lite_ridge_runtime != nullptr) {
+        const Slice& ukey = get_context->ukey_to_get_blob_value();
+        const uint64_t tracing_get_id = get_context->get_tracing_get_id();
+
+        V4LiteRidgeFeatures feats;
+        const bool admit = rep_->v4_lite_ridge_runtime->ShouldAdmit(
+            rep_->admission_file_number, rep_->level, handle.offset(),
+            handle.size(), ukey, tracing_get_id, &feats);
+        if (!admit) {
+          gate_ro.fill_cache = false;
         }
       }
     }
