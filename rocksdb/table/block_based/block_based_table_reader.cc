@@ -90,19 +90,6 @@ CacheAllocationPtr CopyBufferToHeap(MemoryAllocator* allocator, Slice& buf) {
   return heap_buf;
 }
 
-std::shared_ptr<V4LiteRidgeAdmissionRuntime> GetSharedV4LiteRuntime(
-    uint32_t history_window, double threshold) {
-  static std::mutex mu;
-  static std::shared_ptr<V4LiteRidgeAdmissionRuntime> runtime;
-
-  std::lock_guard<std::mutex> lg(mu);
-  if (!runtime) {
-    runtime = std::make_shared<V4LiteRidgeAdmissionRuntime>(history_window,
-                                                            threshold);
-  }
-  return runtime;
-}
-
 std::shared_ptr<MLCacheAdmissionRuntime> GetSharedMLCacheAdmissionRuntime() {
   static std::mutex mu;
   static std::shared_ptr<MLCacheAdmissionRuntime> runtime;
@@ -985,14 +972,8 @@ Status BlockBasedTable::Open(
                     cur_file_num, &rep->base_cache_key);
 
   //project2
-  rep->admission_file_number = cur_file_num;
   if (rep->table_options.enable_ml_cache_admission) {
     rep->ml_cache_admission_runtime = GetSharedMLCacheAdmissionRuntime();
-  }
-  if (rep->table_options.enable_v4_lite_ridge_admission) {
-    rep->v4_lite_ridge_runtime = GetSharedV4LiteRuntime(
-        rep->table_options.v4_lite_history_window,
-        rep->table_options.v4_lite_ridge_threshold);
   }
   //project2
 
@@ -1856,18 +1837,6 @@ BlockBasedTable::MaybeReadBlockAndLoadToCache(
         const bool admit = rep_->ml_cache_admission_runtime->ShouldAdmit(
             handle.size(), rep_->level,
             rep_->table_options.ml_cache_admission_threshold);
-        if (!admit) {
-          gate_ro.fill_cache = false;
-        }
-      } else if (rep_->table_options.enable_v4_lite_ridge_admission &&
-                 rep_->v4_lite_ridge_runtime != nullptr) {
-        const Slice& ukey = get_context->ukey_to_get_blob_value();
-        const uint64_t tracing_get_id = get_context->get_tracing_get_id();
-
-        V4LiteRidgeFeatures feats;
-        const bool admit = rep_->v4_lite_ridge_runtime->ShouldAdmit(
-            rep_->admission_file_number, rep_->level, handle.offset(),
-            handle.size(), ukey, tracing_get_id, &feats);
         if (!admit) {
           gate_ro.fill_cache = false;
         }

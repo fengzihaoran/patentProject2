@@ -40,7 +40,6 @@
 
 //project2
 #include "table/block_based/ml_cache_admission.h"
-#include "table/block_based/v4_lite_ridge_admission.h"
 //project2
 
 namespace ROCKSDB_NAMESPACE {
@@ -658,8 +657,6 @@ struct BlockBasedTable::Rep {
 
   //project2
   std::shared_ptr<MLCacheAdmissionRuntime> ml_cache_admission_runtime;
-  std::shared_ptr<V4LiteRidgeAdmissionRuntime> v4_lite_ridge_runtime;
-  uint64_t admission_file_number = 0;
   //project2
 
   // If global_seqno is used, all Keys in this file will have the same

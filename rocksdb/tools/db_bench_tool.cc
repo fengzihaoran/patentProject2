@@ -647,15 +647,6 @@ DEFINE_bool(cache_index_and_filter_blocks, false,
             "Cache index/filter blocks in block cache.");
 
 //project2
-DEFINE_bool(enable_v4_lite_ridge_admission, false,
-            "Enable V4-lite Ridge admission gate for data-block cache insert.");
-
-DEFINE_double(v4_lite_ridge_threshold, 4.979705,
-              "Admission threshold for V4-lite Ridge score.");
-
-DEFINE_uint32(v4_lite_history_window, 10000,
-              "History window used by V4-lite Ridge online features.");
-
 DEFINE_bool(enable_ml_cache_admission, false,
             "Enable online logistic-regression admission gate for data blocks.");
 
@@ -4775,12 +4766,6 @@ class Benchmark {
       }
 
       //project2
-      block_based_options.enable_v4_lite_ridge_admission =
-    FLAGS_enable_v4_lite_ridge_admission;
-      block_based_options.v4_lite_ridge_threshold =
-          FLAGS_v4_lite_ridge_threshold;
-      block_based_options.v4_lite_history_window =
-          FLAGS_v4_lite_history_window;
       block_based_options.enable_ml_cache_admission =
           FLAGS_enable_ml_cache_admission;
       block_based_options.ml_cache_admission_threshold =
