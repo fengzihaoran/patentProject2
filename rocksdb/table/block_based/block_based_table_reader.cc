@@ -100,6 +100,18 @@ std::shared_ptr<MLCacheAdmissionRuntime> GetSharedMLCacheAdmissionRuntime() {
   }
   return runtime;
 }
+
+std::shared_ptr<RFHotCacheAdmissionRuntime>
+GetSharedRFHotCacheAdmissionRuntime() {
+  static std::mutex mu;
+  static std::shared_ptr<RFHotCacheAdmissionRuntime> runtime;
+
+  std::lock_guard<std::mutex> lg(mu);
+  if (!runtime) {
+    runtime = std::make_shared<RFHotCacheAdmissionRuntime>();
+  }
+  return runtime;
+}
 }  // namespace
 
 // Explicitly instantiate templates for each "blocklike" type we use (and
@@ -975,6 +987,9 @@ Status BlockBasedTable::Open(
   if (rep->table_options.enable_ml_cache_admission) {
     rep->ml_cache_admission_runtime = GetSharedMLCacheAdmissionRuntime();
   }
+  if (rep->table_options.enable_rf_hot_cache_admission) {
+    rep->rf_hot_cache_admission_runtime = GetSharedRFHotCacheAdmissionRuntime();
+  }
   //project2
 
   rep->persistent_cache_options =
@@ -1800,7 +1815,18 @@ BlockBasedTable::MaybeReadBlockAndLoadToCache(
   CacheKey key_data;
   Slice key;
   bool is_cache_hit = false;
+  bool has_rf_hot_access = false;
+  RFHotCacheAdmissionAccess rf_hot_access;
   if (block_cache) {
+    if (std::is_same<TBlocklike, Block_kData>::value &&
+        rep_->table_options.enable_rf_hot_cache_admission &&
+        rep_->rf_hot_cache_admission_runtime != nullptr && !for_compaction) {
+      rf_hot_access = rep_->rf_hot_cache_admission_runtime->PrepareAccess(
+          handle.size(), rep_->level, rep_->cf_id_for_tracing(),
+          rep_->sst_number_for_tracing(), handle.offset());
+      has_rf_hot_access = true;
+    }
+
     // create key for block cache
     key_data = GetCacheKey(rep_->base_cache_key, handle);
     key = key_data.AsSlice();
@@ -1830,9 +1856,18 @@ BlockBasedTable::MaybeReadBlockAndLoadToCache(
     }
 
     if (std::is_same<TBlocklike, Block_kData>::value &&
-        !is_cache_hit && gate_ro.fill_cache && !no_io && get_context != nullptr &&
+        !is_cache_hit && gate_ro.fill_cache && !no_io &&
         !for_compaction) {
-      if (rep_->table_options.enable_ml_cache_admission &&
+      if (rep_->table_options.enable_rf_hot_cache_admission &&
+          rep_->rf_hot_cache_admission_runtime != nullptr &&
+          has_rf_hot_access) {
+        const bool admit = rep_->rf_hot_cache_admission_runtime->ShouldAdmit(
+            rf_hot_access,
+            rep_->table_options.rf_hot_cache_admission_threshold);
+        if (!admit) {
+          gate_ro.fill_cache = false;
+        }
+      } else if (rep_->table_options.enable_ml_cache_admission &&
           rep_->ml_cache_admission_runtime != nullptr) {
         const bool admit = rep_->ml_cache_admission_runtime->ShouldAdmit(
             handle.size(), rep_->level,
@@ -1841,6 +1876,10 @@ BlockBasedTable::MaybeReadBlockAndLoadToCache(
           gate_ro.fill_cache = false;
         }
       }
+    }
+
+    if (has_rf_hot_access) {
+      rep_->rf_hot_cache_admission_runtime->ObserveAccess(rf_hot_access);
     }
 
     // Can't find the block from the cache. If I/O is allowed, read from the

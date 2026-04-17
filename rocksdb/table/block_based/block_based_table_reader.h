@@ -40,6 +40,7 @@
 
 //project2
 #include "table/block_based/ml_cache_admission.h"
+#include "table/block_based/rf_hot_cache_admission.h"
 //project2
 
 namespace ROCKSDB_NAMESPACE {
@@ -657,6 +658,7 @@ struct BlockBasedTable::Rep {
 
   //project2
   std::shared_ptr<MLCacheAdmissionRuntime> ml_cache_admission_runtime;
+  std::shared_ptr<RFHotCacheAdmissionRuntime> rf_hot_cache_admission_runtime;
   //project2
 
   // If global_seqno is used, all Keys in this file will have the same

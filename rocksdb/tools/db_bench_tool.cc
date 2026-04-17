@@ -653,6 +653,13 @@ DEFINE_bool(enable_ml_cache_admission, false,
 DEFINE_double(ml_cache_admission_threshold, 0.5,
               "Admission threshold for online logistic-regression probability.");
 
+DEFINE_bool(enable_rf_hot_cache_admission, false,
+            "Enable online random-forest admission gate with hotness features.");
+
+DEFINE_double(
+    rf_hot_cache_admission_threshold, 0.5,
+    "Admission threshold for online random-forest probability.");
+
 DEFINE_string(
     cache_admission_snapshot_file, "",
     "If non-empty, periodically dump RocksDB/LSM state snapshots to this CSV.");
@@ -4766,10 +4773,21 @@ class Benchmark {
       }
 
       //project2
+      if (FLAGS_enable_ml_cache_admission &&
+          FLAGS_enable_rf_hot_cache_admission) {
+        fprintf(stderr,
+                "enable_ml_cache_admission and "
+                "enable_rf_hot_cache_admission are mutually exclusive\n");
+        db_bench_exit(1);
+      }
       block_based_options.enable_ml_cache_admission =
           FLAGS_enable_ml_cache_admission;
       block_based_options.ml_cache_admission_threshold =
           FLAGS_ml_cache_admission_threshold;
+      block_based_options.enable_rf_hot_cache_admission =
+          FLAGS_enable_rf_hot_cache_admission;
+      block_based_options.rf_hot_cache_admission_threshold =
+          FLAGS_rf_hot_cache_admission_threshold;
       //project2
 
       block_based_options.cache_index_and_filter_blocks =
@@ -5436,7 +5454,8 @@ class Benchmark {
     //project2
     if (db == &db_ &&
         (!FLAGS_cache_admission_snapshot_file.empty() ||
-         FLAGS_enable_ml_cache_admission)) {
+         FLAGS_enable_ml_cache_admission ||
+         FLAGS_enable_rf_hot_cache_admission)) {
       if (snapshot_dumper_) {
         snapshot_dumper_->Stop();
         snapshot_dumper_.reset();

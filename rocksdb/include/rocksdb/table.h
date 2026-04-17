@@ -304,6 +304,12 @@ struct BlockBasedTableOptions {
 
   // Admit a missed data block only when predicted probability exceeds this.
   double ml_cache_admission_threshold = 0.5;
+
+  // Online random-forest admission gate with hotness features.
+  bool enable_rf_hot_cache_admission = false;
+
+  // Admit a missed data block only when RF predicted probability exceeds this.
+  double rf_hot_cache_admission_threshold = 0.5;
   //project2
 
 
