@@ -164,6 +164,8 @@ def infer_workload(dataset_path: Path, data_root: Path) -> str:
     try:
         rel = dataset_path.resolve().relative_to(data_root.resolve())
         parts = rel.parts
+        if len(parts) >= 2:
+            return parts[1]
         return parts[0] if parts else "unknown"
     except Exception:
         return "unknown"
