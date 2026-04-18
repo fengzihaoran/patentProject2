@@ -4,6 +4,9 @@ set -euo pipefail
 DB_BENCH=/home/qhsf5/yuej/patentProject2/rocksdb/cmake-build-release/db_bench
 DATA_ROOT=/yuejData/rocksdb_exp
 TS=$(date +%Y%m%d_%H%M%S)
+CACHE_INDEX_AND_FILTER_BLOCKS="${CACHE_INDEX_AND_FILTER_BLOCKS:-false}"
+USE_DIRECT_READS="${USE_DIRECT_READS:-true}"
+USE_DIRECT_IO_FOR_FLUSH_AND_COMPACTION="${USE_DIRECT_IO_FOR_FLUSH_AND_COMPACTION:-true}"
 
 mkdir -p "$DATA_ROOT"
 
@@ -22,6 +25,9 @@ fi
   --threads=16 \
   --key_size=20 \
   --value_size=100 \
+  --cache_index_and_filter_blocks="$CACHE_INDEX_AND_FILTER_BLOCKS" \
+  --use_direct_reads="$USE_DIRECT_READS" \
+  --use_direct_io_for_flush_and_compaction="$USE_DIRECT_IO_FOR_FLUSH_AND_COMPACTION" \
   --compression_type=none \
   --disable_wal=1 \
   --seed=101 \
@@ -37,6 +43,9 @@ fi
   --threads=16 \
   --key_size=20 \
   --value_size=100 \
+  --cache_index_and_filter_blocks="$CACHE_INDEX_AND_FILTER_BLOCKS" \
+  --use_direct_reads="$USE_DIRECT_READS" \
+  --use_direct_io_for_flush_and_compaction="$USE_DIRECT_IO_FOR_FLUSH_AND_COMPACTION" \
   --compression_type=none \
   --disable_wal=1 \
   --seed=101 \
@@ -44,4 +53,3 @@ fi
   --histogram=1 \
   > "$DATA_ROOT/db_30m_pristine_build.log" \
   2> "$DATA_ROOT/db_30m_pristine_build.err"
-
