@@ -55,6 +55,16 @@ def parse_args() -> argparse.Namespace:
         default="1.10",
         help="Comma-separated thresholds to exclude from lookup selection.",
     )
+    parser.add_argument(
+        "--include-seeds",
+        default="",
+        help="Optional comma-separated seed list to include when building the lookup.",
+    )
+    parser.add_argument(
+        "--exclude-seeds",
+        default="",
+        help="Optional comma-separated seed list to exclude when building the lookup.",
+    )
     return parser.parse_args()
 
 
@@ -130,6 +140,8 @@ def write_report(
     lookup: pd.DataFrame,
     group_cols: Sequence[str],
     excluded_thresholds: Sequence[float],
+    included_seeds: Sequence[str],
+    excluded_seeds: Sequence[str],
 ) -> None:
     with out_path.open("w", encoding="utf-8") as f:
         f.write("# Dynamic Threshold Lookup Report\n\n")
@@ -142,6 +154,12 @@ def write_report(
         f.write(
             f"- excluded_thresholds: `{', '.join(f'{x:g}' for x in excluded_thresholds)}`\n\n"
         )
+        if included_seeds:
+            f.write(f"- included_seeds: `{', '.join(included_seeds)}`\n")
+        if excluded_seeds:
+            f.write(f"- excluded_seeds: `{', '.join(excluded_seeds)}`\n")
+        if included_seeds or excluded_seeds:
+            f.write("\n")
 
         f.write("## Selected Thresholds\n\n")
         for _, row in lookup.iterrows():
@@ -160,6 +178,8 @@ def main() -> int:
     args = parse_args()
     group_cols = parse_csv_list(args.group_by)
     excluded_thresholds = [float(x) for x in parse_csv_list(args.exclude_thresholds)]
+    included_seeds = parse_csv_list(args.include_seeds)
+    excluded_seeds = parse_csv_list(args.exclude_seeds)
 
     df = load_compare_files(args.compare_files)
     required = set(group_cols) | {
@@ -174,8 +194,16 @@ def main() -> int:
         raise ValueError(f"Missing required columns: {missing}")
 
     filtered = df[~df["threshold"].isin(excluded_thresholds)].copy()
+    if included_seeds:
+        if "seed" not in filtered.columns:
+            raise ValueError("--include-seeds requires a seed column.")
+        filtered = filtered[filtered["seed"].astype(str).isin(included_seeds)].copy()
+    if excluded_seeds:
+        if "seed" not in filtered.columns:
+            raise ValueError("--exclude-seeds requires a seed column.")
+        filtered = filtered[~filtered["seed"].astype(str).isin(excluded_seeds)].copy()
     if filtered.empty:
-        raise ValueError("No rows left after excluding thresholds.")
+        raise ValueError("No rows left after applying lookup filters.")
 
     agg = (
         filtered.groupby(group_cols + ["threshold"], dropna=False)
@@ -215,7 +243,15 @@ def main() -> int:
         json.dumps(winners.to_dict(orient="records"), indent=2), encoding="utf-8"
     )
     lookup_inc.write_text(render_cpp_entries(winners, group_cols), encoding="utf-8")
-    write_report(report_md, filtered, winners, group_cols, excluded_thresholds)
+    write_report(
+        report_md,
+        filtered,
+        winners,
+        group_cols,
+        excluded_thresholds,
+        included_seeds,
+        excluded_seeds,
+    )
 
     print(f"Wrote: {agg_csv}")
     print(f"Wrote: {lookup_csv}")

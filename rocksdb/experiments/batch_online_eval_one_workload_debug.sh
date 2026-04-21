@@ -45,6 +45,9 @@ RUN_DB_ROOT="${RUN_DB_ROOT:-$OUT_ROOT/_run_dbs}"
 DB_PATH="${DB_PATH:-/yuejData/rocksdb_exp/db_10m_pristine}"
 DB_LABEL="${DB_LABEL:-10M}"
 NUM="${NUM:-10000000}"
+DB_PATHS_CSV="${DB_PATHS_CSV:-}"
+DB_LABELS_CSV="${DB_LABELS_CSV:-}"
+NUMS_CSV="${NUMS_CSV:-}"
 
 WORKLOAD="${WORKLOAD:-}"
 WORKLOADS_CSV="${WORKLOADS_CSV:-}"
@@ -227,7 +230,33 @@ run_one() {
 
 require_file "$DB_BENCH"
 require_file "$SUMMARY_PY"
-require_dir "$DB_PATH"
+
+# Backward compatible multi-DB support. Prefer DB_PATHS_CSV/DB_LABELS_CSV/NUMS_CSV
+# for new runs, but also accept comma-separated DB_PATH/DB_LABEL/NUM if provided.
+if [[ -z "$DB_PATHS_CSV" && "$DB_PATH" == *","* ]]; then
+  DB_PATHS_CSV="$DB_PATH"
+  DB_LABELS_CSV="$DB_LABEL"
+  NUMS_CSV="$NUM"
+fi
+
+if [[ -n "$DB_PATHS_CSV" ]]; then
+  split_csv "$DB_PATHS_CSV" DB_PATHS
+  split_csv "$DB_LABELS_CSV" DB_LABELS
+  split_csv "$NUMS_CSV" NUMS
+else
+  DB_PATHS=("$DB_PATH")
+  DB_LABELS=("$DB_LABEL")
+  NUMS=("$NUM")
+fi
+
+if [[ "${#DB_PATHS[@]}" -ne "${#DB_LABELS[@]}" || "${#DB_PATHS[@]}" -ne "${#NUMS[@]}" ]]; then
+  echo "[ERR] DB_PATHS_CSV, DB_LABELS_CSV, and NUMS_CSV must have the same length." >&2
+  exit 1
+fi
+
+for db_path in "${DB_PATHS[@]}"; do
+  require_dir "$db_path"
+done
 
 if [[ "$REBUILD_BINARIES" == "1" ]]; then
   require_dir "$BUILD_DIR"
@@ -261,7 +290,9 @@ REPORT_MD="$OUT_ROOT/report.md"
 echo "db_label,workload,cache_size,cache_label,seed,duration_sec,variant,threshold,run_dir,stdout_log,stderr_log,snapshot_csv" > "$RUN_MANIFEST_CSV"
 
 echo "[INFO] OUT_ROOT=$OUT_ROOT"
-echo "[INFO] DB_PATH=$DB_PATH DB_LABEL=$DB_LABEL NUM=$NUM"
+echo "[INFO] DB_PATHS=${DB_PATHS[*]}"
+echo "[INFO] DB_LABELS=${DB_LABELS[*]}"
+echo "[INFO] NUMS=${NUMS[*]}"
 echo "[INFO] WORKLOADS=${WORKLOADS[*]}"
 echo "[INFO] CACHE_SIZES=${CACHE_SIZES[*]}"
 echo "[INFO] SEEDS=${SEEDS[*]}"
@@ -270,18 +301,24 @@ echo "[INFO] INCLUDE_NODATACACHE=$INCLUDE_NODATACACHE NODATACACHE_THRESHOLD=$NOD
 echo "[INFO] USE_DIRECT_READS=$USE_DIRECT_READS USE_DIRECT_IO_FOR_FLUSH_AND_COMPACTION=$USE_DIRECT_IO_FOR_FLUSH_AND_COMPACTION"
 echo "[INFO] THREADS=$THREADS READ_ONLY_DURATION=$READ_ONLY_DURATION MIXED_RW_DURATION=$MIXED_RW_DURATION"
 
-for workload in "${WORKLOADS[@]}"; do
-  DURATION_SEC="$(workload_duration "$workload")"
-  echo "[INFO] workload=$workload duration=$DURATION_SEC"
-  for cache_size in "${CACHE_SIZES[@]}"; do
-    cache_label="$(human_cache "$cache_size")"
-    for seed in "${SEEDS[@]}"; do
-      run_one "$workload" "$cache_size" "$cache_label" "$seed" "$DURATION_SEC" "baseline" ""
-      if [[ "$INCLUDE_NODATACACHE" == "1" ]]; then
-        run_one "$workload" "$cache_size" "$cache_label" "$seed" "$DURATION_SEC" "ml_t${NODATACACHE_THRESHOLD}_nodatacache" "$NODATACACHE_THRESHOLD"
-      fi
-      for threshold in "${LOW_THRESHOLDS[@]}"; do
-        run_one "$workload" "$cache_size" "$cache_label" "$seed" "$DURATION_SEC" "ml_t${threshold}" "$threshold"
+for db_idx in "${!DB_PATHS[@]}"; do
+  DB_PATH="${DB_PATHS[$db_idx]}"
+  DB_LABEL="${DB_LABELS[$db_idx]}"
+  NUM="${NUMS[$db_idx]}"
+  echo "[INFO] db=$DB_LABEL path=$DB_PATH num=$NUM"
+  for workload in "${WORKLOADS[@]}"; do
+    DURATION_SEC="$(workload_duration "$workload")"
+    echo "[INFO] workload=$workload duration=$DURATION_SEC"
+    for cache_size in "${CACHE_SIZES[@]}"; do
+      cache_label="$(human_cache "$cache_size")"
+      for seed in "${SEEDS[@]}"; do
+        run_one "$workload" "$cache_size" "$cache_label" "$seed" "$DURATION_SEC" "baseline" ""
+        if [[ "$INCLUDE_NODATACACHE" == "1" ]]; then
+          run_one "$workload" "$cache_size" "$cache_label" "$seed" "$DURATION_SEC" "ml_t${NODATACACHE_THRESHOLD}_nodatacache" "$NODATACACHE_THRESHOLD"
+        fi
+        for threshold in "${LOW_THRESHOLDS[@]}"; do
+          run_one "$workload" "$cache_size" "$cache_label" "$seed" "$DURATION_SEC" "ml_t${threshold}" "$threshold"
+        done
       done
     done
   done

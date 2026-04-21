@@ -9,11 +9,35 @@ Outputs:
 - oof_predictions.csv: leave-one-run-out out-of-fold predictions
 - threshold_metrics.csv: pooled metrics for requested thresholds
 - report.md: compact training/evaluation summary
+
+Sample:
+python /home/qhsf5/yuej/patentProject2/python/scripts/train_export_logreg.py \
+  --data-root /yuejData/rocksdb_exp/final_paper_matrix_directio \
+  --include-workloads readrandom,multireadrandom,readwhilewriting \
+  --output-dir /home/qhsf5/yuej/patentProject2/python/output/train_export_logreg_pointlookup_directio \
+  --thresholds 0.20,0.25,0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.70,0.80,0.90 \
+  --class-weight balanced \
+  --c 1.0 \
+  --solver lbfgs \
+  --max-iter 1000 \
+  --train-max-rows-per-run 50000 \
+  --read-sample-count-lines \
+  --oof-max-rows-per-run 10000
+
+  这条命令的含义：
+    最终模型每个 run 最多用 50000 行，54 个 run 大约最多 270万 行，足够训练 10 维逻辑回归。
+    离线 OOF 指标每个 run 用 10000 行，避免 54 折全量训练拖死。
+    如果还慢，把 --train-max-rows-per-run 改成 20000，--oof-max-rows-per-run 改成 5000。
+
+  如果你想更稳，可以后面把：
+    --train-max-rows-per-run 100000
+    --oof-max-rows-per-run 20000
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
@@ -129,6 +153,35 @@ def parse_args() -> argparse.Namespace:
         help="LogisticRegression solver.",
     )
     parser.add_argument(
+        "--oof-max-rows-per-run",
+        type=int,
+        default=0,
+        help=(
+            "Use at most this many rows per run for leave-one-run-out OOF "
+            "evaluation. 0 means full OOF. Final exported model still trains "
+            "on the full loaded training data unless --train-max-rows-per-run "
+            "is set. Default: 0."
+        ),
+    )
+    parser.add_argument(
+        "--train-max-rows-per-run",
+        type=int,
+        default=0,
+        help=(
+            "Use at most this many rows per run for final model training. "
+            "0 means use all rows. Default: 0."
+        ),
+    )
+    parser.add_argument(
+        "--read-sample-count-lines",
+        action="store_true",
+        help=(
+            "When --train-max-rows-per-run is set, count CSV rows first and "
+            "parse only randomly selected row numbers. This avoids parsing "
+            "multi-GB CSV files just to sample them."
+        ),
+    )
+    parser.add_argument(
         "--random-state",
         type=int,
         default=42,
@@ -152,6 +205,25 @@ def find_dataset_files(args: argparse.Namespace) -> List[Path]:
     return files
 
 
+def filter_dataset_paths_by_workload(
+    paths: Sequence[Path],
+    data_root: Path,
+    include_workloads: Sequence[str],
+    exclude_workloads: Sequence[str],
+) -> List[Path]:
+    filtered: List[Path] = []
+    for path in paths:
+        workload = infer_workload(path, data_root)
+        if include_workloads and workload not in include_workloads:
+            continue
+        if exclude_workloads and workload in exclude_workloads:
+            continue
+        filtered.append(path)
+    if not filtered:
+        raise ValueError("No dataset files left after workload path filtering.")
+    return filtered
+
+
 def infer_run_id(dataset_path: Path, data_root: Path) -> str:
     try:
         rel = dataset_path.resolve().relative_to(data_root.resolve())
@@ -171,12 +243,82 @@ def infer_workload(dataset_path: Path, data_root: Path) -> str:
         return "unknown"
 
 
-def load_datasets(paths: Sequence[Path], data_root: Path) -> pd.DataFrame:
+def dataset_dtypes(feature_names: Sequence[str]) -> Dict[str, str]:
+    dtypes = {name: "float32" for name in feature_names}
+    dtypes[LABEL_COLUMN] = "int8"
+    return dtypes
+
+
+def stable_path_seed(path: Path, random_state: int) -> int:
+    digest = hashlib.blake2b(str(path).encode("utf-8"), digest_size=8).digest()
+    return (int.from_bytes(digest, "little") ^ int(random_state)) & 0xFFFFFFFF
+
+
+def count_csv_data_rows(path: Path) -> int:
+    total_lines = 0
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            total_lines += chunk.count(b"\n")
+    return max(total_lines - 1, 0)
+
+
+def sampled_skiprows(path: Path, sample_size: int, random_state: int):
+    total_rows = count_csv_data_rows(path)
+    if sample_size <= 0 or total_rows <= sample_size:
+        return None, total_rows
+    rng = np.random.default_rng(stable_path_seed(path, random_state))
+    # pandas passes row index 0 for the header, and 1..N for data rows.
+    keep_rows = set(
+        int(row_idx) for row_idx in rng.choice(total_rows, size=sample_size, replace=False) + 1
+    )
+
+    def should_skip(row_idx: int) -> bool:
+        return row_idx != 0 and row_idx not in keep_rows
+
+    return should_skip, total_rows
+
+
+def load_datasets(
+    paths: Sequence[Path],
+    data_root: Path,
+    feature_names: Sequence[str],
+    random_state: int,
+    train_max_rows_per_run: int = 0,
+    read_sample_count_lines: bool = False,
+) -> pd.DataFrame:
     frames: List[pd.DataFrame] = []
-    for path in paths:
-        df = pd.read_csv(path)
+    required_columns = set(feature_names) | {LABEL_COLUMN}
+    dtypes = dataset_dtypes(feature_names)
+    for idx, path in enumerate(paths, start=1):
+        print(f"[LOAD] {idx}/{len(paths)} {path}", flush=True)
+        skiprows = None
+        if train_max_rows_per_run > 0 and read_sample_count_lines:
+            skiprows, total_rows = sampled_skiprows(
+                path, train_max_rows_per_run, random_state=random_state
+            )
+            if skiprows is not None:
+                print(
+                    f"[LOAD] sampling {train_max_rows_per_run}/{total_rows} rows from {path.name}",
+                    flush=True,
+                )
+        df = pd.read_csv(
+            path,
+            usecols=lambda col: col in required_columns,
+            dtype=dtypes,
+            low_memory=False,
+            skiprows=skiprows,
+        )
         if LABEL_COLUMN not in df.columns:
             raise ValueError(f"{path} missing required column: {LABEL_COLUMN}")
+        missing_features = [col for col in feature_names if col not in df.columns]
+        if missing_features:
+            raise ValueError(f"{path} missing feature columns: {missing_features}")
+        if (
+            train_max_rows_per_run > 0
+            and not read_sample_count_lines
+            and len(df) > train_max_rows_per_run
+        ):
+            df = df.sample(n=train_max_rows_per_run, random_state=random_state)
         df[RUN_COLUMN] = infer_run_id(path, data_root)
         df[DATASET_COLUMN] = str(path)
         df[WORKLOAD_COLUMN] = infer_workload(path, data_root)
@@ -206,6 +348,24 @@ def to_numeric_if_present(df: pd.DataFrame, columns: Iterable[str]) -> None:
         if col not in df.columns:
             raise ValueError(f"Missing required feature column: {col}")
         df[col] = pd.to_numeric(df[col], errors="coerce")
+
+
+def sample_rows_per_run(
+    df: pd.DataFrame, max_rows_per_run: int, random_state: int
+) -> pd.DataFrame:
+    if max_rows_per_run <= 0:
+        return df
+    sampled = (
+        df.groupby(RUN_COLUMN, group_keys=False, sort=False)
+        .apply(
+            lambda group: group.sample(
+                n=min(len(group), max_rows_per_run),
+                random_state=random_state,
+            )
+        )
+        .reset_index(drop=True)
+    )
+    return sampled
 
 
 def make_pipeline(args: argparse.Namespace) -> Pipeline:
@@ -265,6 +425,10 @@ def run_leave_one_run_out(
     for fold_idx, (train_idx, test_idx) in enumerate(logo.split(x, y, groups), start=1):
         if len(test_idx) < args.min_test_rows:
             continue
+        print(
+            f"[OOF] fold={fold_idx} train_rows={len(train_idx)} test_rows={len(test_idx)}",
+            flush=True,
+        )
         pipe = make_pipeline(args)
         pipe.fit(x.iloc[train_idx], y[train_idx])
         y_prob = pipe.predict_proba(x.iloc[test_idx])[:, 1]
@@ -360,6 +524,8 @@ def write_report(
         f.write(f"- datasets: `{len(dataset_files)}`\n")
         f.write(f"- workloads: `{', '.join(workloads)}`\n")
         f.write(f"- rows: `{int(summary['num_rows'])}`\n")
+        if "num_oof_rows" in summary:
+            f.write(f"- oof_rows: `{int(summary['num_oof_rows'])}`\n")
         f.write(f"- runs: `{int(summary['num_runs'])}`\n")
         f.write(f"- positive_ratio: `{summary['label_pos_ratio']:.6f}`\n\n")
         f.write("## Pooled OOF Metrics\n\n")
@@ -385,17 +551,51 @@ def main() -> None:
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    dataset_files = find_dataset_files(args)
     data_root = args.data_root.resolve()
     include_workloads = parse_csv_list(args.include_workloads)
     exclude_workloads = parse_csv_list(args.exclude_workloads)
     thresholds = [float(x) for x in parse_csv_list(args.thresholds)]
 
-    df = load_datasets(dataset_files, data_root)
+    all_dataset_files = find_dataset_files(args)
+    dataset_files = filter_dataset_paths_by_workload(
+        all_dataset_files, data_root, include_workloads, exclude_workloads
+    )
+    print(
+        f"[INFO] datasets={len(dataset_files)} "
+        f"(found={len(all_dataset_files)}) output_dir={output_dir}",
+        flush=True,
+    )
+    df = load_datasets(
+        dataset_files,
+        data_root,
+        ONLINE_LITE_FEATURES,
+        random_state=args.random_state,
+        train_max_rows_per_run=args.train_max_rows_per_run,
+        read_sample_count_lines=args.read_sample_count_lines,
+    )
     df = filter_workloads(df, include_workloads, exclude_workloads)
     to_numeric_if_present(df, ONLINE_LITE_FEATURES)
+    print(
+        f"[INFO] loaded rows={len(df)} runs={df[RUN_COLUMN].nunique()} "
+        f"workloads={','.join(sorted(df[WORKLOAD_COLUMN].unique().tolist()))} "
+        f"positive_ratio={df[LABEL_COLUMN].mean():.6f}",
+        flush=True,
+    )
 
-    oof, summary = run_leave_one_run_out(df, ONLINE_LITE_FEATURES, args)
+    oof_df = sample_rows_per_run(
+        df, args.oof_max_rows_per_run, random_state=args.random_state
+    )
+    if args.oof_max_rows_per_run > 0:
+        print(
+            f"[INFO] OOF sampled rows={len(oof_df)} "
+            f"max_rows_per_run={args.oof_max_rows_per_run}",
+            flush=True,
+        )
+    oof, summary = run_leave_one_run_out(oof_df, ONLINE_LITE_FEATURES, args)
+    summary["num_rows"] = float(len(df))
+    summary["num_oof_rows"] = float(len(oof_df))
+    summary["num_runs"] = float(df[RUN_COLUMN].nunique())
+    summary["label_pos_ratio"] = float(df[LABEL_COLUMN].mean())
     y_true = oof["y_true"].to_numpy()
     y_prob = oof["y_prob"].to_numpy()
 

@@ -30,7 +30,7 @@ import bisect
 import csv
 import math
 import sys
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Deque, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -61,10 +61,54 @@ TRACE_FIELDS = [
     "block_offset",
 ]
 
+IDX_ACCESS_TS_US = 0
+IDX_BLOCK_TYPE = 2
+IDX_BLOCK_SIZE = 3
+IDX_CF_ID = 4
+IDX_CF_NAME = 5
+IDX_LEVEL = 6
+IDX_SST_FD_NUMBER = 7
+IDX_CALLER = 8
+IDX_NO_INSERT = 9
+IDX_GET_ID = 10
+IDX_REFERENCED_DATA_SIZE = 12
+IDX_IS_CACHE_HIT = 13
+IDX_REFERENCED_KEY_EXIST_IN_BLOCK = 14
+IDX_NUM_KEYS_IN_BLOCK = 15
+IDX_BLOCK_OFFSET = 20
 
-# TraceType enum values are stable enough for first-pass filtering.
-# We only need the data-block one.
-TRACE_TYPE_DATA_BLOCK = 7
+BASE_FIELDNAMES = [
+    "ts_us",
+    "cf_id",
+    "cf_name",
+    "sst_fd_number",
+    "block_offset",
+    "block_size",
+    "level",
+    "caller",
+    "referenced_data_size",
+    "referenced_key_exist_in_block",
+    "num_keys_in_block",
+    "recent_block_hits_10s",
+    "recent_block_hits_60s",
+    "recent_sst_hits_10s",
+    "recent_sst_hits_60s",
+    "recent_cf_hits_10s",
+    "recent_cf_hits_60s",
+    "future_reuse_count",
+    "first_reuse_delta_us",
+    "invalidated_within_horizon",
+    "invalidation_delta_us",
+    "survived_until_first_reuse",
+    "benefit_score",
+    "label",
+]
+
+
+# In this RocksDB checkout, TraceType::kBlockTraceDataBlock = 9.
+# 7 and 8 are index/filter blocks, which are not the intended training target
+# for this script.
+TRACE_TYPE_DATA_BLOCK = 9
 
 # TableReaderCaller enum values come from include/rocksdb/table_reader_caller.h.
 # RocksDB uses 1-based values:
@@ -116,6 +160,14 @@ class InvalidationEvent:
     ts_us: int
     cf_name: str
     input_files: List[Tuple[int, int]]
+
+
+@dataclass
+class TraceLoadStats:
+    total_rows: int
+    kept_events: int
+    block_type_counts: Counter[int]
+    caller_counts: Counter[int]
 
 
 def parse_args() -> argparse.Namespace:
@@ -216,52 +268,72 @@ def parse_float(raw: str) -> float:
     return float(raw)
 
 
-def load_block_trace(path: Path, allow_iterator: bool) -> List[TraceEvent]:
+def load_block_trace(
+    path: Path, allow_iterator: bool
+) -> Tuple[List[TraceEvent], TraceLoadStats]:
     events: List[TraceEvent] = []
     allowed_callers = set(USER_CALLERS)
     if not allow_iterator:
         allowed_callers.discard(3)
+    block_type_counts: Counter[int] = Counter()
+    caller_counts: Counter[int] = Counter()
+    total_rows = 0
+    in_time_order = True
+    prev_kept_ts_us = -1
 
     with path.open("r", newline="") as fh:
         reader = csv.reader(fh)
         for row_num, row in enumerate(reader, start=1):
             if not row:
                 continue
+            total_rows += 1
             if len(row) != len(TRACE_FIELDS):
                 raise ValueError(
                     f"{path}:{row_num}: expected {len(TRACE_FIELDS)} fields, got {len(row)}"
                 )
-            data = dict(zip(TRACE_FIELDS, row))
-            caller = parse_int(data["caller"])
-            event = TraceEvent(
-                ts_us=parse_int(data["access_ts_us"]),
-                block=BlockKey(
-                    cf_id=parse_int(data["cf_id"]),
-                    sst_fd_number=parse_int(data["sst_fd_number"]),
-                    block_offset=parse_int(data["block_offset"]),
-                ),
-                block_type=parse_int(data["block_type"]),
-                block_size=parse_int(data["block_size"]),
-                cf_name=data["cf_name"],
-                level=parse_int(data["level"]),
-                caller=caller,
-                no_insert=parse_int(data["no_insert"]),
-                get_id=parse_int(data["get_id"]),
-                is_cache_hit=parse_int(data["is_cache_hit"]),
-                referenced_data_size=parse_int(data["referenced_data_size"]),
-                referenced_key_exist_in_block=parse_int(
-                    data["referenced_key_exist_in_block"]
-                ),
-                num_keys_in_block=parse_int(data["num_keys_in_block"]),
-            )
-            if event.block_type != TRACE_TYPE_DATA_BLOCK:
+            block_type = parse_int(row[IDX_BLOCK_TYPE])
+            caller = parse_int(row[IDX_CALLER])
+            block_type_counts[block_type] += 1
+            caller_counts[caller] += 1
+            if block_type != TRACE_TYPE_DATA_BLOCK:
                 continue
             if caller not in allowed_callers:
                 continue
+            ts_us = parse_int(row[IDX_ACCESS_TS_US])
+            if prev_kept_ts_us > ts_us:
+                in_time_order = False
+            prev_kept_ts_us = ts_us
+            event = TraceEvent(
+                ts_us=ts_us,
+                block=BlockKey(
+                    cf_id=parse_int(row[IDX_CF_ID]),
+                    sst_fd_number=parse_int(row[IDX_SST_FD_NUMBER]),
+                    block_offset=parse_int(row[IDX_BLOCK_OFFSET]),
+                ),
+                block_type=block_type,
+                block_size=parse_int(row[IDX_BLOCK_SIZE]),
+                cf_name=row[IDX_CF_NAME],
+                level=parse_int(row[IDX_LEVEL]),
+                caller=caller,
+                no_insert=parse_int(row[IDX_NO_INSERT]),
+                get_id=parse_int(row[IDX_GET_ID]),
+                is_cache_hit=parse_int(row[IDX_IS_CACHE_HIT]),
+                referenced_data_size=parse_int(row[IDX_REFERENCED_DATA_SIZE]),
+                referenced_key_exist_in_block=parse_int(
+                    row[IDX_REFERENCED_KEY_EXIST_IN_BLOCK]
+                ),
+                num_keys_in_block=parse_int(row[IDX_NUM_KEYS_IN_BLOCK]),
+            )
             events.append(event)
 
-    events.sort(key=lambda e: e.ts_us)
-    return events
+    if not in_time_order:
+        events.sort(key=lambda e: e.ts_us)
+    return events, TraceLoadStats(
+        total_rows=total_rows,
+        kept_events=len(events),
+        block_type_counts=block_type_counts,
+        caller_counts=caller_counts,
+    )
 
 
 def load_snapshot_csv(path: Path) -> Tuple[List[int], List[SnapshotPoint]]:
@@ -379,25 +451,34 @@ def build_dataset(
     short_us = recent_short_seconds * 1_000_000
     long_us = recent_long_seconds * 1_000_000
 
-    by_block: Dict[BlockKey, List[int]] = defaultdict(list)
-    for idx, event in enumerate(events):
-        by_block[event.block].append(idx)
+    by_block_ts: Dict[BlockKey, List[int]] = defaultdict(list)
+    for event in events:
+        by_block_ts[event.block].append(event.ts_us)
 
-    recent_block: Dict[BlockKey, Deque[int]] = defaultdict(deque)
-    recent_sst: Dict[Tuple[str, int], Deque[int]] = defaultdict(deque)
-    recent_cf: Dict[str, Deque[int]] = defaultdict(deque)
+    recent_block_short: Dict[BlockKey, Deque[int]] = defaultdict(deque)
+    recent_block_long: Dict[BlockKey, Deque[int]] = defaultdict(deque)
+    recent_sst_short: Dict[Tuple[str, int], Deque[int]] = defaultdict(deque)
+    recent_sst_long: Dict[Tuple[str, int], Deque[int]] = defaultdict(deque)
+    recent_cf_short: Dict[str, Deque[int]] = defaultdict(deque)
+    recent_cf_long: Dict[str, Deque[int]] = defaultdict(deque)
 
-    next_pos_per_block: Dict[BlockKey, int] = defaultdict(int)
     last_candidate_ts_by_block: Dict[BlockKey, int] = {}
 
-    for idx, event in enumerate(events):
-        block_hist = recent_block[event.block]
-        sst_hist = recent_sst[(event.cf_name, event.block.sst_fd_number)]
-        cf_hist = recent_cf[event.cf_name]
+    for event in events:
+        sst_key = (event.cf_name, event.block.sst_fd_number)
+        block_short = recent_block_short[event.block]
+        block_long = recent_block_long[event.block]
+        sst_short = recent_sst_short[sst_key]
+        sst_long = recent_sst_long[sst_key]
+        cf_short = recent_cf_short[event.cf_name]
+        cf_long = recent_cf_long[event.cf_name]
 
-        prune_old(block_hist, event.ts_us - long_us)
-        prune_old(sst_hist, event.ts_us - long_us)
-        prune_old(cf_hist, event.ts_us - long_us)
+        prune_old(block_short, event.ts_us - short_us)
+        prune_old(block_long, event.ts_us - long_us)
+        prune_old(sst_short, event.ts_us - short_us)
+        prune_old(sst_long, event.ts_us - long_us)
+        prune_old(cf_short, event.ts_us - short_us)
+        prune_old(cf_long, event.ts_us - long_us)
 
         is_candidate = event.is_cache_hit == 0
         if is_candidate:
@@ -410,25 +491,17 @@ def build_dataset(
 
         if is_candidate:
             last_candidate_ts_by_block[event.block] = event.ts_us
-            block_indices = by_block[event.block]
-            pos = next_pos_per_block[event.block]
-            while pos < len(block_indices) and block_indices[pos] <= idx:
-                pos += 1
-            next_pos_per_block[event.block] = pos
-
-            future_reuse_count = 0
-            first_reuse_delta_us = -1
-            j = pos
-            while j < len(block_indices):
-                future_idx = block_indices[j]
-                future_event = events[future_idx]
-                delta_us = future_event.ts_us - event.ts_us
-                if delta_us > horizon_us:
-                    break
-                future_reuse_count += 1
-                if first_reuse_delta_us < 0:
-                    first_reuse_delta_us = delta_us
-                j += 1
+            block_ts = by_block_ts[event.block]
+            future_start = bisect.bisect_right(block_ts, event.ts_us)
+            future_end = bisect.bisect_right(
+                block_ts, event.ts_us + horizon_us, lo=future_start
+            )
+            future_reuse_count = future_end - future_start
+            first_reuse_delta_us = (
+                block_ts[future_start] - event.ts_us
+                if future_start < future_end
+                else -1
+            )
 
             invalidation_ts = next_invalidation_ts(event.ts_us, event, invalidations)
             invalidated_within_horizon = 0
@@ -468,12 +541,12 @@ def build_dataset(
                 "referenced_data_size": event.referenced_data_size,
                 "referenced_key_exist_in_block": event.referenced_key_exist_in_block,
                 "num_keys_in_block": event.num_keys_in_block,
-                "recent_block_hits_10s": count_recent(block_hist, event.ts_us - short_us),
-                "recent_block_hits_60s": len(block_hist),
-                "recent_sst_hits_10s": count_recent(sst_hist, event.ts_us - short_us),
-                "recent_sst_hits_60s": len(sst_hist),
-                "recent_cf_hits_10s": count_recent(cf_hist, event.ts_us - short_us),
-                "recent_cf_hits_60s": len(cf_hist),
+                "recent_block_hits_10s": len(block_short),
+                "recent_block_hits_60s": len(block_long),
+                "recent_sst_hits_10s": len(sst_short),
+                "recent_sst_hits_60s": len(sst_long),
+                "recent_cf_hits_10s": len(cf_short),
+                "recent_cf_hits_60s": len(cf_long),
                 "future_reuse_count": future_reuse_count,
                 "first_reuse_delta_us": first_reuse_delta_us,
                 "invalidated_within_horizon": invalidated_within_horizon,
@@ -486,38 +559,37 @@ def build_dataset(
                 row[key] = value
             yield row
 
-        block_hist.append(event.ts_us)
-        sst_hist.append(event.ts_us)
-        cf_hist.append(event.ts_us)
+        block_short.append(event.ts_us)
+        block_long.append(event.ts_us)
+        sst_short.append(event.ts_us)
+        sst_long.append(event.ts_us)
+        cf_short.append(event.ts_us)
+        cf_long.append(event.ts_us)
 
 
-def count_recent(queue: Deque[int], min_ts_us: int) -> int:
-    count = 0
-    for ts in reversed(queue):
-        if ts < min_ts_us:
-            break
-        count += 1
-    return count
+def format_counter(counter: Counter[int], value_names: Dict[int, str]) -> str:
+    if not counter:
+        return "(none)"
+    parts: List[str] = []
+    for key, count in sorted(counter.items()):
+        label = value_names.get(key, str(key))
+        parts.append(f"{label}={count}")
+    return ", ".join(parts)
 
 
-def write_rows(path: Path, rows: Iterable[Dict[str, object]]) -> int:
-    materialized = list(rows)
-    if not materialized:
-        raise ValueError("No candidate samples were generated.")
-
-    fieldnames: List[str] = []
-    seen = set()
-    for row in materialized:
-        for key in row.keys():
-            if key not in seen:
-                seen.add(key)
-                fieldnames.append(key)
-
+def write_rows(
+    path: Path, rows: Iterable[Dict[str, object]], fieldnames: Sequence[str]
+) -> int:
+    row_count = 0
     with path.open("w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(materialized)
-    return len(materialized)
+        for row in rows:
+            writer.writerow(row)
+            row_count += 1
+    if row_count == 0:
+        path.unlink(missing_ok=True)
+    return row_count
 
 
 def main() -> int:
@@ -530,28 +602,44 @@ def main() -> int:
     snapshots: List[SnapshotPoint] = []
     invalidations: Dict[Tuple[str, int], List[int]] = {}
 
-    events = load_block_trace(block_trace, allow_iterator=args.allow_iterator)
+    events, trace_stats = load_block_trace(
+        block_trace, allow_iterator=args.allow_iterator
+    )
     if args.snapshot_csv:
         snapshot_ts, snapshots = load_snapshot_csv(Path(args.snapshot_csv))
     if args.sst_trace_tsv:
         invalidations = load_sst_trace_tsv(Path(args.sst_trace_tsv))
 
-    row_count = write_rows(
-        output,
-        build_dataset(
-            events=events,
-            snapshot_ts=snapshot_ts,
-            snapshots=snapshots,
-            invalidations=invalidations,
-            horizon_seconds=args.horizon_seconds,
-            positive_reuse_threshold=args.positive_reuse_threshold,
-            candidate_cooldown_ms=args.candidate_cooldown_ms,
-            max_first_reuse_seconds=args.max_first_reuse_seconds,
-            min_benefit_score=args.min_benefit_score,
-            recent_short_seconds=args.recent_short_seconds,
-            recent_long_seconds=args.recent_long_seconds,
-        ),
+    snapshot_fieldnames: List[str] = []
+    if snapshots:
+        snapshot_fieldnames = [
+            key for key in snapshots[0].values.keys() if key not in BASE_FIELDNAMES
+        ]
+    fieldnames = BASE_FIELDNAMES + snapshot_fieldnames
+
+    rows = build_dataset(
+        events=events,
+        snapshot_ts=snapshot_ts,
+        snapshots=snapshots,
+        invalidations=invalidations,
+        horizon_seconds=args.horizon_seconds,
+        positive_reuse_threshold=args.positive_reuse_threshold,
+        candidate_cooldown_ms=args.candidate_cooldown_ms,
+        max_first_reuse_seconds=args.max_first_reuse_seconds,
+        min_benefit_score=args.min_benefit_score,
+        recent_short_seconds=args.recent_short_seconds,
+        recent_long_seconds=args.recent_long_seconds,
     )
+    row_count = write_rows(output, rows, fieldnames)
+    if row_count == 0:
+        raise ValueError(
+            "No candidate samples were generated. "
+            f"Loaded {trace_stats.kept_events} user-access data-block events "
+            f"from {trace_stats.total_rows} trace rows after filtering. "
+            f"block_type counts: "
+            f"{format_counter(trace_stats.block_type_counts, {7: 'index', 8: 'filter', 9: 'data', 10: 'uncompression_dict', 11: 'range_deletion'})}. "
+            f"caller counts: {format_counter(trace_stats.caller_counts, CALLER_NAMES)}."
+        )
 
     print(f"Wrote {row_count} training samples to {output}")
     return 0
