@@ -1834,9 +1834,16 @@ BlockBasedTable::MaybeReadBlockAndLoadToCache(
         !for_compaction) {
       if (rep_->table_options.enable_ml_cache_admission &&
           rep_->ml_cache_admission_runtime != nullptr) {
+        double admission_threshold =
+            rep_->table_options.ml_cache_admission_threshold;
+        if (rep_->table_options.ml_cache_admission_dynamic_threshold) {
+          admission_threshold = MLCacheAdmissionResolveThreshold(
+              rep_->table_options.ml_cache_admission_workload,
+              rep_->table_options.ml_cache_admission_cache_label,
+              admission_threshold);
+        }
         const bool admit = rep_->ml_cache_admission_runtime->ShouldAdmit(
-            handle.size(), rep_->level,
-            rep_->table_options.ml_cache_admission_threshold);
+            handle.size(), rep_->level, admission_threshold);
         if (!admit) {
           gate_ro.fill_cache = false;
         }

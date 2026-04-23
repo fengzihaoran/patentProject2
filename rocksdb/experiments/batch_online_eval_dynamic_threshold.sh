@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Online evaluation for the calibrated dynamic-threshold admission policy.
+#
+# Default comparison:
+#   baseline vs fixed threshold fallback vs dynamic threshold lookup
+#
+# The fixed threshold is controlled by FIXED_THRESHOLD and is also used as the
+# dynamic lookup fallback for unknown workload/cache combinations.
+
+RUNNER="${RUNNER:-/home/qhsf5/yuej/patentProject2/rocksdb/experiments/batch_online_eval_one_workload_debug.sh}"
+
+DB_BENCH="${DB_BENCH:-/home/qhsf5/yuej/patentProject2/rocksdb/cmake-build-release/db_bench}"
+BUILD_DIR="${BUILD_DIR:-/home/qhsf5/yuej/patentProject2/rocksdb/cmake-build-release}"
+SUMMARY_PY="${SUMMARY_PY:-/home/qhsf5/yuej/patentProject2/python/scripts/rebuild_online_eval_reports.py}"
+
+OUT_ROOT="${OUT_ROOT:-/yuejData/rocksdb_exp/online_eval_dynamic_threshold_200k}"
+DB_PATHS_CSV="${DB_PATHS_CSV:-/yuejData/rocksdb_exp/db_10m_pristine,/yuejData/rocksdb_exp/db_30m_pristine}"
+DB_LABELS_CSV="${DB_LABELS_CSV:-10M,30M}"
+NUMS_CSV="${NUMS_CSV:-10000000,30000000}"
+
+WORKLOADS_CSV="${WORKLOADS_CSV:-readrandom,multireadrandom,readwhilewriting}"
+CACHE_SIZES_CSV="${CACHE_SIZES_CSV:-33554432,134217728,536870912}"
+SEEDS_CSV="${SEEDS_CSV:-303}"
+FIXED_THRESHOLD="${FIXED_THRESHOLD:-0.45}"
+
+THREADS="${THREADS:-16}"
+READ_ONLY_DURATION="${READ_ONLY_DURATION:-180}"
+MIXED_RW_DURATION="${MIXED_RW_DURATION:-300}"
+KEY_SIZE="${KEY_SIZE:-20}"
+VALUE_SIZE="${VALUE_SIZE:-100}"
+COMPRESSION_TYPE="${COMPRESSION_TYPE:-none}"
+CACHE_INDEX_AND_FILTER_BLOCKS="${CACHE_INDEX_AND_FILTER_BLOCKS:-false}"
+USE_DIRECT_READS="${USE_DIRECT_READS:-true}"
+USE_DIRECT_IO_FOR_FLUSH_AND_COMPACTION="${USE_DIRECT_IO_FOR_FLUSH_AND_COMPACTION:-true}"
+REBUILD_BINARIES="${REBUILD_BINARIES:-1}"
+PRESERVE_RUN_DB="${PRESERVE_RUN_DB:-0}"
+COLLECT_ML_SNAPSHOT="${COLLECT_ML_SNAPSHOT:-0}"
+
+DB_BENCH="$DB_BENCH" \
+BUILD_DIR="$BUILD_DIR" \
+SUMMARY_PY="$SUMMARY_PY" \
+OUT_ROOT="$OUT_ROOT" \
+DB_PATHS_CSV="$DB_PATHS_CSV" \
+DB_LABELS_CSV="$DB_LABELS_CSV" \
+NUMS_CSV="$NUMS_CSV" \
+WORKLOADS_CSV="$WORKLOADS_CSV" \
+CACHE_SIZES_CSV="$CACHE_SIZES_CSV" \
+SEEDS_CSV="$SEEDS_CSV" \
+LOW_THRESHOLDS_CSV="$FIXED_THRESHOLD" \
+INCLUDE_DYNAMIC_THRESHOLD=1 \
+DYNAMIC_FALLBACK_THRESHOLD="$FIXED_THRESHOLD" \
+INCLUDE_NODATACACHE=0 \
+THREADS="$THREADS" \
+READ_ONLY_DURATION="$READ_ONLY_DURATION" \
+MIXED_RW_DURATION="$MIXED_RW_DURATION" \
+KEY_SIZE="$KEY_SIZE" \
+VALUE_SIZE="$VALUE_SIZE" \
+COMPRESSION_TYPE="$COMPRESSION_TYPE" \
+CACHE_INDEX_AND_FILTER_BLOCKS="$CACHE_INDEX_AND_FILTER_BLOCKS" \
+USE_DIRECT_READS="$USE_DIRECT_READS" \
+USE_DIRECT_IO_FOR_FLUSH_AND_COMPACTION="$USE_DIRECT_IO_FOR_FLUSH_AND_COMPACTION" \
+REBUILD_BINARIES="$REBUILD_BINARIES" \
+PRESERVE_RUN_DB="$PRESERVE_RUN_DB" \
+COLLECT_ML_SNAPSHOT="$COLLECT_ML_SNAPSHOT" \
+"$RUNNER"
+

@@ -651,7 +651,21 @@ DEFINE_bool(enable_ml_cache_admission, false,
             "Enable online logistic-regression admission gate for data blocks.");
 
 DEFINE_double(ml_cache_admission_threshold, 0.5,
-              "Admission threshold for online logistic-regression probability.");
+              "Admission threshold for online logistic-regression probability. "
+              "Also used as fallback when dynamic threshold lookup misses.");
+
+DEFINE_bool(
+    ml_cache_admission_dynamic_threshold, false,
+    "Use calibrated workload/cache dynamic threshold lookup for ML admission.");
+
+DEFINE_string(ml_cache_admission_workload, "",
+              "Optional workload key for ML dynamic threshold lookup. If empty, "
+              "db_bench uses --benchmarks.");
+
+DEFINE_string(
+    ml_cache_admission_cache_label, "",
+    "Optional cache label for ML dynamic threshold lookup. If empty, db_bench "
+    "derives labels like 32MB/128MB/512MB from --cache_size.");
 
 DEFINE_string(
     cache_admission_snapshot_file, "",
@@ -1901,6 +1915,25 @@ static Status CreateMemTableRepFactory(
 }
 
 }  // namespace
+
+static std::string MLCacheAdmissionCacheLabel(int64_t cache_size) {
+  switch (cache_size) {
+    case 33554432:
+      return "32MB";
+    case 67108864:
+      return "64MB";
+    case 134217728:
+      return "128MB";
+    case 268435456:
+      return "256MB";
+    case 536870912:
+      return "512MB";
+    case 1073741824:
+      return "1GB";
+    default:
+      return std::to_string(cache_size);
+  }
+}
 
 enum DistributionType : unsigned char { kFixed = 0, kUniform, kNormal };
 
@@ -4770,6 +4803,16 @@ class Benchmark {
           FLAGS_enable_ml_cache_admission;
       block_based_options.ml_cache_admission_threshold =
           FLAGS_ml_cache_admission_threshold;
+      block_based_options.ml_cache_admission_dynamic_threshold =
+          FLAGS_ml_cache_admission_dynamic_threshold;
+      block_based_options.ml_cache_admission_workload =
+          FLAGS_ml_cache_admission_workload.empty()
+              ? FLAGS_benchmarks
+              : FLAGS_ml_cache_admission_workload;
+      block_based_options.ml_cache_admission_cache_label =
+          FLAGS_ml_cache_admission_cache_label.empty()
+              ? MLCacheAdmissionCacheLabel(FLAGS_cache_size)
+              : FLAGS_ml_cache_admission_cache_label;
       //project2
 
       block_based_options.cache_index_and_filter_blocks =

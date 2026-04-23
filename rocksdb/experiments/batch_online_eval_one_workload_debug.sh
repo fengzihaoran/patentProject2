@@ -56,6 +56,8 @@ SEEDS_CSV="${SEEDS_CSV:-101,202,303}"
 LOW_THRESHOLDS_CSV="${LOW_THRESHOLDS_CSV:-0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45}"
 INCLUDE_NODATACACHE="${INCLUDE_NODATACACHE:-1}"
 NODATACACHE_THRESHOLD="${NODATACACHE_THRESHOLD:-1.10}"
+INCLUDE_DYNAMIC_THRESHOLD="${INCLUDE_DYNAMIC_THRESHOLD:-0}"
+DYNAMIC_FALLBACK_THRESHOLD="${DYNAMIC_FALLBACK_THRESHOLD:-0.45}"
 
 THREADS="${THREADS:-16}"
 READ_ONLY_DURATION="${READ_ONLY_DURATION:-180}"
@@ -206,6 +208,11 @@ run_one() {
   if [[ "$variant" != "baseline" ]]; then
     args+=(--enable_ml_cache_admission=1)
     args+=(--ml_cache_admission_threshold="$threshold")
+    if [[ "$variant" == ml_dynamic* ]]; then
+      args+=(--ml_cache_admission_dynamic_threshold=1)
+      args+=(--ml_cache_admission_workload="$workload")
+      args+=(--ml_cache_admission_cache_label="$cache_label")
+    fi
     if [[ "$COLLECT_ML_SNAPSHOT" == "1" ]]; then
       snapshot_csv="$run_dir/snapshot.csv"
       args+=(--cache_admission_snapshot_file="$snapshot_csv")
@@ -298,6 +305,7 @@ echo "[INFO] CACHE_SIZES=${CACHE_SIZES[*]}"
 echo "[INFO] SEEDS=${SEEDS[*]}"
 echo "[INFO] LOW_THRESHOLDS=${LOW_THRESHOLDS[*]}"
 echo "[INFO] INCLUDE_NODATACACHE=$INCLUDE_NODATACACHE NODATACACHE_THRESHOLD=$NODATACACHE_THRESHOLD"
+echo "[INFO] INCLUDE_DYNAMIC_THRESHOLD=$INCLUDE_DYNAMIC_THRESHOLD DYNAMIC_FALLBACK_THRESHOLD=$DYNAMIC_FALLBACK_THRESHOLD"
 echo "[INFO] USE_DIRECT_READS=$USE_DIRECT_READS USE_DIRECT_IO_FOR_FLUSH_AND_COMPACTION=$USE_DIRECT_IO_FOR_FLUSH_AND_COMPACTION"
 echo "[INFO] THREADS=$THREADS READ_ONLY_DURATION=$READ_ONLY_DURATION MIXED_RW_DURATION=$MIXED_RW_DURATION"
 
@@ -313,6 +321,9 @@ for db_idx in "${!DB_PATHS[@]}"; do
       cache_label="$(human_cache "$cache_size")"
       for seed in "${SEEDS[@]}"; do
         run_one "$workload" "$cache_size" "$cache_label" "$seed" "$DURATION_SEC" "baseline" ""
+        if [[ "$INCLUDE_DYNAMIC_THRESHOLD" == "1" ]]; then
+          run_one "$workload" "$cache_size" "$cache_label" "$seed" "$DURATION_SEC" "ml_dynamic_t${DYNAMIC_FALLBACK_THRESHOLD}" "$DYNAMIC_FALLBACK_THRESHOLD"
+        fi
         if [[ "$INCLUDE_NODATACACHE" == "1" ]]; then
           run_one "$workload" "$cache_size" "$cache_label" "$seed" "$DURATION_SEC" "ml_t${NODATACACHE_THRESHOLD}_nodatacache" "$NODATACACHE_THRESHOLD"
         fi

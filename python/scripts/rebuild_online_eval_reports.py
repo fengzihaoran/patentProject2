@@ -236,6 +236,30 @@ workload_threshold_summary["num_runs"] = (
 )
 workload_threshold_summary.to_csv(workload_threshold_summary_csv, index=False)
 
+variant_summary_csv = compare_csv.with_name("variant_summary.csv")
+variant_summary = (
+    compare.groupby(["variant", "threshold"], dropna=False)
+    .agg(agg_map)
+    .reset_index()
+)
+variant_summary["num_runs"] = (
+    compare.groupby(["variant", "threshold"], dropna=False).size().values
+)
+variant_summary.to_csv(variant_summary_csv, index=False)
+
+workload_variant_summary_csv = compare_csv.with_name("workload_variant_summary.csv")
+workload_variant_summary = (
+    compare.groupby(["db_label", "workload", "variant", "threshold"], dropna=False)
+    .agg(agg_map)
+    .reset_index()
+)
+workload_variant_summary["num_runs"] = (
+    compare.groupby(["db_label", "workload", "variant", "threshold"], dropna=False)
+    .size()
+    .values
+)
+workload_variant_summary.to_csv(workload_variant_summary_csv, index=False)
+
 
 with report_md.open("w", encoding="utf-8") as f:
     f.write("# Online Evaluation Report\n\n")
@@ -284,11 +308,15 @@ with report_md.open("w", encoding="utf-8") as f:
     f.write("- `compare_to_baseline.csv`\n")
     f.write("- `threshold_summary.csv`\n")
     f.write("- `workload_threshold_summary.csv`\n")
+    f.write("- `variant_summary.csv`\n")
+    f.write("- `workload_variant_summary.csv`\n")
 
 print(f"Wrote: {raw_results_csv}")
 print(f"Wrote: {compare_csv}")
 print(f"Wrote: {threshold_summary_csv}")
 print(f"Wrote: {workload_threshold_summary_csv}")
+print(f"Wrote: {variant_summary_csv}")
+print(f"Wrote: {workload_variant_summary_csv}")
 print(f"Wrote: {report_md}")
 
 print("[DONE] online evaluation matrix complete: $OUT_ROOT")

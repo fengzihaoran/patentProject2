@@ -304,6 +304,15 @@ struct BlockBasedTableOptions {
 
   // Admit a missed data block only when predicted probability exceeds this.
   double ml_cache_admission_threshold = 0.5;
+
+  // If enabled, resolve the admission threshold from a calibrated lookup table.
+  // ml_cache_admission_threshold is still used as the fallback threshold.
+  bool ml_cache_admission_dynamic_threshold = false;
+
+  // Lookup keys for dynamic threshold selection. db_bench fills these from
+  // the benchmark name and cache size for controlled online experiments.
+  std::string ml_cache_admission_workload;
+  std::string ml_cache_admission_cache_label;
   //project2
 
 

@@ -5,8 +5,41 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <string>
 
 namespace ROCKSDB_NAMESPACE {
+
+#include "table/block_based/dynamic_threshold_lookup.inc"
+
+inline double MLCacheAdmissionResolveThreshold(const std::string& workload,
+                                               const std::string& cache_label,
+                                               double fallback_threshold) {
+  if (!workload.empty() && !cache_label.empty()) {
+    for (const auto& entry : kDynamicThresholdTable) {
+      if (std::strcmp(entry.workload, workload.c_str()) == 0 &&
+          std::strcmp(entry.cache_label, cache_label.c_str()) == 0) {
+        return entry.threshold;
+      }
+    }
+  }
+
+  if (!workload.empty()) {
+    double sum = 0.0;
+    uint32_t count = 0;
+    for (const auto& entry : kDynamicThresholdTable) {
+      if (std::strcmp(entry.workload, workload.c_str()) == 0) {
+        sum += entry.threshold;
+        ++count;
+      }
+    }
+    if (count > 0) {
+      return sum / static_cast<double>(count);
+    }
+  }
+
+  return fallback_threshold;
+}
 
 struct OnlineCacheAdmissionSnapshot {
   uint64_t l0_files = 0;
