@@ -10,6 +10,15 @@ set -euo pipefail
 # overwritten. Pass this script's compare_to_baseline.csv together with the
 # other calibration compare files when building the dynamic threshold lookup.
 
+#Sample:
+#sed -i 's/\r$//' /home/qhsf5/yuej/patentProject2/rocksdb/experiments/batch_online_eval_calib_full_200k_missing_t040.sh
+#chmod +x /home/qhsf5/yuej/patentProject2/rocksdb/experiments/batch_online_eval_calib_full_200k_missing_t040.sh
+#
+#REBUILD_BINARIES=1 \
+#OUT_ROOT=/yuejData/rocksdb_exp/online_eval_calib_full_directio_200k_missing \
+#/home/qhsf5/yuej/patentProject2/rocksdb/experiments/batch_online_eval_calib_full_200k_missing_t040.sh
+
+
 DB_BENCH="${DB_BENCH:-/home/qhsf5/yuej/patentProject2/rocksdb/cmake-build-release/db_bench}"
 BUILD_DIR="${BUILD_DIR:-/home/qhsf5/yuej/patentProject2/rocksdb/cmake-build-release}"
 SUMMARY_PY="${SUMMARY_PY:-/home/qhsf5/yuej/patentProject2/python/scripts/rebuild_online_eval_reports.py}"
