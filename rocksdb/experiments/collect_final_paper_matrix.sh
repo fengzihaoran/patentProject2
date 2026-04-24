@@ -42,6 +42,7 @@ ALLOW_EMPTY_DATASET="${ALLOW_EMPTY_DATASET:-1}"
 WORKLOADS_CSV="${WORKLOADS_CSV:-readrandom,multireadrandom,seekrandom,readwhilewriting,seekrandomwhilewriting}"
 CACHE_SIZES_CSV="${CACHE_SIZES_CSV:-33554432,67108864,134217728,268435456,536870912}"
 SEEDS_CSV="${SEEDS_CSV:-101,202,303}"
+READ_RANDOM_EXP_RANGE_CSV="${READ_RANDOM_EXP_RANGE_CSV:-0}"
 
 THREADS="${THREADS:-16}"
 READ_ONLY_DURATION="${READ_ONLY_DURATION:-180}"
@@ -113,6 +114,21 @@ human_cache() {
   esac
 }
 
+exp_range_label() {
+  echo "$1" | sed 's/-/m/g; s/\./p/g'
+}
+
+workload_supports_read_random_exp_range() {
+  case "$1" in
+    readrandom|multireadrandom|readwhilewriting|multireadwhilewriting)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 append_workload_args() {
   local workload="$1"
   local -n args_ref="$2"
@@ -165,6 +181,7 @@ require_file "$TRACE_ANALYZER"
 split_csv "$WORKLOADS_CSV" WORKLOADS
 split_csv "$CACHE_SIZES_CSV" CACHE_SIZES
 split_csv "$SEEDS_CSV" SEEDS
+split_csv "$READ_RANDOM_EXP_RANGE_CSV" READ_RANDOM_EXP_RANGES
 split_csv "$DB_PATHS_CSV" DB_PATHS
 split_csv "$DB_LABELS_CSV" DB_LABELS
 split_csv "$NUMS_CSV" NUMS
@@ -186,11 +203,12 @@ REPORT_MD="$MATRIX_ROOT/report.md"
 mkdir -p "$MATRIX_ROOT"
 mkdir -p "$RUN_DB_ROOT"
 
-echo "db_label,workload,cache_size,cache_label,seed,duration_sec,status,rows,label_pos,label_neg,pos_ratio,unique_blocks,snapshot_rows,snapshot_l0_unique,snapshot_l1_unique,run_dir,source_db_path,work_db_dir" > "$MANIFEST_CSV"
+echo "db_label,workload,read_random_exp_range,read_random_exp_label,cache_size,cache_label,seed,duration_sec,status,rows,label_pos,label_neg,pos_ratio,unique_blocks,snapshot_rows,snapshot_l0_unique,snapshot_l1_unique,run_dir,source_db_path,work_db_dir" > "$MANIFEST_CSV"
 
 echo "[INFO] MATRIX_ROOT=$MATRIX_ROOT"
 echo "[INFO] DB_LABELS=${DB_LABELS[*]}"
 echo "[INFO] WORKLOADS=${WORKLOADS[*]}"
+echo "[INFO] READ_RANDOM_EXP_RANGES=${READ_RANDOM_EXP_RANGES[*]}"
 echo "[INFO] CACHE_SIZES=${CACHE_SIZES[*]}"
 echo "[INFO] SEEDS=${SEEDS[*]}"
 echo "[INFO] NUMS=${NUMS[*]} THREADS=$THREADS READ_ONLY_DURATION=$READ_ONLY_DURATION MIXED_RW_DURATION=$MIXED_RW_DURATION"
@@ -208,11 +226,17 @@ for idx in "${!DB_PATHS[@]}"; do
   mkdir -p "$run_db_label_root"
 
   for workload in "${WORKLOADS[@]}"; do
-    for cache_size in "${CACHE_SIZES[@]}"; do
-      for seed in "${SEEDS[@]}"; do
+    for read_random_exp_range in "${READ_RANDOM_EXP_RANGES[@]}"; do
+      if ! workload_supports_read_random_exp_range "$workload" && [[ "$read_random_exp_range" != "0" && "$read_random_exp_range" != "0.0" ]]; then
+        echo "[SKIP] workload=$workload ignores read_random_exp_range=$read_random_exp_range"
+        continue
+      fi
+      read_random_exp_label="$(exp_range_label "$read_random_exp_range")"
+      for cache_size in "${CACHE_SIZES[@]}"; do
+        for seed in "${SEEDS[@]}"; do
         cache_label="$(human_cache "$cache_size")"
         duration_sec="$(workload_duration "$workload")"
-        run_dir="$label_root/$workload/cache_${cache_label}/seed_${seed}"
+        run_dir="$label_root/$workload/exp_${read_random_exp_label}/cache_${cache_label}/seed_${seed}"
         mkdir -p "$run_dir"
 
         block_bin="$run_dir/block_trace.bin"
@@ -224,7 +248,7 @@ for idx in "${!DB_PATHS[@]}"; do
         stdout_log="$run_dir/stdout.log"
         stderr_log="$run_dir/stderr.log"
         command_sh="$run_dir/command.sh"
-        work_db_dir="$run_db_label_root/$workload/cache_${cache_label}/seed_${seed}"
+        work_db_dir="$run_db_label_root/$workload/exp_${read_random_exp_label}/cache_${cache_label}/seed_${seed}"
 
         rm -f "$block_bin" "$block_txt" "$snapshot_csv" "$sst_tsv" "$dataset_csv" "$dataset_log" "$stdout_log" "$stderr_log" "$command_sh"
         mkdir -p "$(dirname "$work_db_dir")"
@@ -246,6 +270,7 @@ for idx in "${!DB_PATHS[@]}"; do
           --use_direct_reads="$USE_DIRECT_READS"
           --use_direct_io_for_flush_and_compaction="$USE_DIRECT_IO_FOR_FLUSH_AND_COMPACTION"
           --compression_type="$COMPRESSION_TYPE"
+          --read_random_exp_range="$read_random_exp_range"
           --seed="$seed"
           --statistics="$STATISTICS"
           --histogram="$HISTOGRAM"
@@ -268,10 +293,10 @@ for idx in "${!DB_PATHS[@]}"; do
         } > "$command_sh"
         chmod +x "$command_sh"
 
-        echo "[RUN] db=$db_label workload=$workload cache=$cache_label seed=$seed duration=$duration_sec"
+        echo "[RUN] db=$db_label workload=$workload exp=$read_random_exp_range cache=$cache_label seed=$seed duration=$duration_sec"
         "$DB_BENCH" "${args[@]}" >"$stdout_log" 2>"$stderr_log"
 
-        echo "[TRACE] db=$db_label workload=$workload cache=$cache_label seed=$seed"
+        echo "[TRACE] db=$db_label workload=$workload exp=$read_random_exp_range cache=$cache_label seed=$seed"
         "$TRACE_ANALYZER" \
           --block_cache_trace_path="$block_bin" \
           --human_readable_trace_file_path="$block_txt"
@@ -280,7 +305,7 @@ for idx in "${!DB_PATHS[@]}"; do
           rm -f "$block_bin"
         fi
 
-        echo "[DATASET] db=$db_label workload=$workload cache=$cache_label seed=$seed"
+        echo "[DATASET] db=$db_label workload=$workload exp=$read_random_exp_range cache=$cache_label seed=$seed"
         dataset_status="ok"
         builder_args=(
           --block-trace "$block_txt" \
@@ -300,16 +325,16 @@ for idx in "${!DB_PATHS[@]}"; do
           >"$dataset_log" 2>&1; then
           if grep -q "No candidate samples were generated" "$dataset_log"; then
             dataset_status="empty_dataset"
-            echo "[WARN] empty dataset: db=$db_label workload=$workload cache=$cache_label seed=$seed"
+            echo "[WARN] empty dataset: db=$db_label workload=$workload exp=$read_random_exp_range cache=$cache_label seed=$seed"
           else
-            echo "[ERR] dataset build failed: db=$db_label workload=$workload cache=$cache_label seed=$seed" >&2
+            echo "[ERR] dataset build failed: db=$db_label workload=$workload exp=$read_random_exp_range cache=$cache_label seed=$seed" >&2
             cat "$dataset_log" >&2
             exit 1
           fi
         fi
 
         if [[ "$dataset_status" == "empty_dataset" && "$ALLOW_EMPTY_DATASET" != "1" ]]; then
-          echo "[ERR] empty dataset and ALLOW_EMPTY_DATASET=0: db=$db_label workload=$workload cache=$cache_label seed=$seed" >&2
+          echo "[ERR] empty dataset and ALLOW_EMPTY_DATASET=0: db=$db_label workload=$workload exp=$read_random_exp_range cache=$cache_label seed=$seed" >&2
           cat "$dataset_log" >&2
           exit 1
         fi
@@ -318,13 +343,13 @@ for idx in "${!DB_PATHS[@]}"; do
           rm -rf "$work_db_dir"
         fi
 
-        python - "$dataset_csv" "$snapshot_csv" "$MANIFEST_CSV" "$db_label" "$workload" "$cache_size" "$cache_label" "$seed" "$duration_sec" "$run_dir" "$db_path" "$work_db_dir" "$dataset_status" <<'PY'
+        python - "$dataset_csv" "$snapshot_csv" "$MANIFEST_CSV" "$db_label" "$workload" "$read_random_exp_range" "$read_random_exp_label" "$cache_size" "$cache_label" "$seed" "$duration_sec" "$run_dir" "$db_path" "$work_db_dir" "$dataset_status" <<'PY'
 import csv
 import os
 import sys
 import pandas as pd
 
-dataset_csv, snapshot_csv, manifest_csv, db_label, workload, cache_size, cache_label, seed, duration_sec, run_dir, source_db_path, work_db_dir, dataset_status = sys.argv[1:]
+dataset_csv, snapshot_csv, manifest_csv, db_label, workload, read_random_exp_range, read_random_exp_label, cache_size, cache_label, seed, duration_sec, run_dir, source_db_path, work_db_dir, dataset_status = sys.argv[1:]
 if os.path.exists(dataset_csv):
     df = pd.read_csv(dataset_csv)
 else:
@@ -343,6 +368,8 @@ pos_ratio = (label_pos / len(df)) if len(df) else float("nan")
 row = [
     db_label,
     workload,
+    read_random_exp_range,
+    read_random_exp_label,
     cache_size,
     cache_label,
     seed,
@@ -364,20 +391,21 @@ row = [
 with open(manifest_csv, "a", newline="") as f:
     csv.writer(f).writerow(row)
 PY
+        done
       done
     done
   done
 done
 
-python - "$MANIFEST_CSV" "$SUMMARY_CSV" "$REPORT_MD" "$DB_LABELS_CSV" "$WORKLOADS_CSV" "$CACHE_SIZES_CSV" "$SEEDS_CSV" <<'PY'
+python - "$MANIFEST_CSV" "$SUMMARY_CSV" "$REPORT_MD" "$DB_LABELS_CSV" "$WORKLOADS_CSV" "$READ_RANDOM_EXP_RANGE_CSV" "$CACHE_SIZES_CSV" "$SEEDS_CSV" <<'PY'
 import sys
 import pandas as pd
 
-manifest_csv, summary_csv, report_md, db_labels_csv, workloads_csv, cache_sizes_csv, seeds_csv = sys.argv[1:]
+manifest_csv, summary_csv, report_md, db_labels_csv, workloads_csv, read_random_exp_range_csv, cache_sizes_csv, seeds_csv = sys.argv[1:]
 df = pd.read_csv(manifest_csv)
 
 summary = (
-    df.groupby(["db_label", "workload", "cache_label", "status"], as_index=False)
+    df.groupby(["db_label", "workload", "read_random_exp_range", "cache_label", "status"], as_index=False)
       .agg(
           runs=("rows", "count"),
           rows_mean=("rows", "mean"),
@@ -393,17 +421,18 @@ with open(report_md, "w", encoding="utf-8") as f:
     f.write("# Final Paper Sampling Report\n\n")
     f.write(f"- db_labels: `{db_labels_csv}`\n")
     f.write(f"- workloads: `{workloads_csv}`\n")
+    f.write(f"- read_random_exp_range: `{read_random_exp_range_csv}`\n")
     f.write(f"- cache_sizes: `{cache_sizes_csv}`\n")
     f.write(f"- seeds: `{seeds_csv}`\n")
     f.write(f"- total_runs: `{len(df)}`\n")
     f.write(f"- total_rows: `{int(df['rows'].sum())}`\n")
     f.write(f"- avg_pos_ratio: `{df['pos_ratio'].mean():.6f}`\n\n")
     f.write("## Per Workload / Cache\n\n")
-    f.write("| db | workload | cache | status | runs | rows_mean | pos_ratio_mean | unique_blocks_mean | l0_unique_mean | l1_unique_mean |\n")
-    f.write("|---|---|---:|---|---:|---:|---:|---:|---:|---:|\n")
+    f.write("| db | workload | exp | cache | status | runs | rows_mean | pos_ratio_mean | unique_blocks_mean | l0_unique_mean | l1_unique_mean |\n")
+    f.write("|---|---|---:|---:|---|---:|---:|---:|---:|---:|---:|\n")
     for _, row in summary.iterrows():
         f.write(
-            f"| {row['db_label']} | {row['workload']} | {row['cache_label']} | {row['status']} | {int(row['runs'])} | "
+            f"| {row['db_label']} | {row['workload']} | {row['read_random_exp_range']} | {row['cache_label']} | {row['status']} | {int(row['runs'])} | "
             f"{row['rows_mean']:.1f} | {row['pos_ratio_mean']:.4f} | "
             f"{row['unique_blocks_mean']:.1f} | {row['l0_unique_mean']:.1f} | {row['l1_unique_mean']:.1f} |\n"
         )

@@ -133,6 +133,10 @@ for rec in manifest.to_dict(orient="records"):
 raw = pd.DataFrame(rows)
 raw.to_csv(raw_results_csv, index=False)
 
+key_columns = ["db_label", "workload", "cache_size", "cache_label", "seed"]
+if "read_random_exp_range" in raw.columns:
+    key_columns.append("read_random_exp_range")
+
 baseline = raw[raw["variant"] == "baseline"].copy()
 baseline = baseline.rename(
     columns={
@@ -151,12 +155,8 @@ baseline = baseline.rename(
     }
 )
 baseline = baseline[
-    [
-        "db_label",
-        "workload",
-        "cache_size",
-        "cache_label",
-        "seed",
+    key_columns
+    + [
         "baseline_micros_per_op",
         "baseline_ops_per_sec",
         "baseline_p50_us",
@@ -175,7 +175,7 @@ baseline = baseline[
 ml = raw[raw["variant"] != "baseline"].copy()
 compare = ml.merge(
     baseline,
-    on=["db_label", "workload", "cache_size", "cache_label", "seed"],
+    on=key_columns,
     how="left",
 )
 
@@ -226,13 +226,16 @@ threshold_summary = (
 threshold_summary["num_runs"] = compare.groupby("threshold").size().values
 threshold_summary.to_csv(threshold_summary_csv, index=False)
 
+workload_group_columns = ["db_label", "workload"]
+if "read_random_exp_range" in compare.columns:
+    workload_group_columns.append("read_random_exp_range")
 workload_threshold_summary = (
-    compare.groupby(["db_label", "workload", "threshold"], dropna=False)
+    compare.groupby(workload_group_columns + ["threshold"], dropna=False)
     .agg(agg_map)
     .reset_index()
 )
 workload_threshold_summary["num_runs"] = (
-    compare.groupby(["db_label", "workload", "threshold"]).size().values
+    compare.groupby(workload_group_columns + ["threshold"], dropna=False).size().values
 )
 workload_threshold_summary.to_csv(workload_threshold_summary_csv, index=False)
 
@@ -249,12 +252,12 @@ variant_summary.to_csv(variant_summary_csv, index=False)
 
 workload_variant_summary_csv = compare_csv.with_name("workload_variant_summary.csv")
 workload_variant_summary = (
-    compare.groupby(["db_label", "workload", "variant", "threshold"], dropna=False)
+    compare.groupby(workload_group_columns + ["variant", "threshold"], dropna=False)
     .agg(agg_map)
     .reset_index()
 )
 workload_variant_summary["num_runs"] = (
-    compare.groupby(["db_label", "workload", "variant", "threshold"], dropna=False)
+    compare.groupby(workload_group_columns + ["variant", "threshold"], dropna=False)
     .size()
     .values
 )
@@ -269,6 +272,10 @@ with report_md.open("w", encoding="utf-8") as f:
     f.write(f"- ml_runs: `{len(ml)}`\n")
     f.write(f"- db_labels: `{', '.join(sorted(raw['db_label'].astype(str).unique()))}`\n")
     f.write(f"- workloads: `{', '.join(sorted(raw['workload'].astype(str).unique()))}`\n")
+    if "read_random_exp_range" in raw.columns:
+        f.write(
+            f"- read_random_exp_ranges: `{', '.join(sorted(raw['read_random_exp_range'].astype(str).unique()))}`\n"
+        )
     f.write(f"- cache_labels: `{', '.join(sorted(raw['cache_label'].astype(str).unique()))}`\n")
     f.write(f"- seeds: `{', '.join(str(x) for x in sorted(raw['seed'].astype(int).unique()))}`\n\n")
 

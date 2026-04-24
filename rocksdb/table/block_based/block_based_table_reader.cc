@@ -1842,8 +1842,29 @@ BlockBasedTable::MaybeReadBlockAndLoadToCache(
               rep_->table_options.ml_cache_admission_cache_label,
               admission_threshold);
         }
+        MLCacheAdmissionAdaptiveConfig adaptive_config;
+        adaptive_config.enabled =
+            rep_->table_options.ml_cache_admission_adaptive_threshold;
+        adaptive_config.window =
+            rep_->table_options.ml_cache_admission_adaptive_window;
+        adaptive_config.step =
+            rep_->table_options.ml_cache_admission_adaptive_step;
+        adaptive_config.return_step =
+            rep_->table_options.ml_cache_admission_adaptive_return_step;
+        adaptive_config.reject_low =
+            rep_->table_options.ml_cache_admission_adaptive_reject_low;
+        adaptive_config.reject_high =
+            rep_->table_options.ml_cache_admission_adaptive_reject_high;
+        adaptive_config.min_threshold =
+            rep_->table_options.ml_cache_admission_adaptive_min_threshold;
+        adaptive_config.max_threshold =
+            rep_->table_options.ml_cache_admission_adaptive_max_threshold;
+        adaptive_config.warmup_windows =
+            rep_->table_options.ml_cache_admission_adaptive_warmup_windows;
+        adaptive_config.consecutive_windows =
+            rep_->table_options.ml_cache_admission_adaptive_consecutive_windows;
         const bool admit = rep_->ml_cache_admission_runtime->ShouldAdmit(
-            handle.size(), rep_->level, admission_threshold);
+            handle.size(), rep_->level, admission_threshold, adaptive_config);
         if (!admit) {
           gate_ro.fill_cache = false;
         }

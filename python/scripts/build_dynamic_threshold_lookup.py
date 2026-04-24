@@ -65,6 +65,58 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Optional comma-separated seed list to exclude when building the lookup.",
     )
+    parser.add_argument(
+        "--selection-policy",
+        choices=("greedy", "safe"),
+        default="greedy",
+        help=(
+            "Threshold selection policy. greedy picks the max-throughput "
+            "threshold per group. safe only deviates from the default threshold "
+            "when calibration improvement passes guard constraints."
+        ),
+    )
+    parser.add_argument(
+        "--default-threshold",
+        type=float,
+        default=0.45,
+        help="Default/fallback threshold used by the safe policy.",
+    )
+    parser.add_argument(
+        "--min-ops-gain-over-default",
+        type=float,
+        default=1.5,
+        help="Safe policy: required ops gain over the default threshold.",
+    )
+    parser.add_argument(
+        "--max-p99-regression-over-default",
+        type=float,
+        default=1.0,
+        help=(
+            "Safe policy: maximum allowed p99 regression percentage points "
+            "relative to the default threshold."
+        ),
+    )
+    parser.add_argument(
+        "--max-reject-ratio",
+        type=float,
+        default=1.0,
+        help="Safe policy: maximum allowed reject ratio for non-default choices.",
+    )
+    parser.add_argument(
+        "--max-reject-increase-over-default",
+        type=float,
+        default=1.0,
+        help=(
+            "Safe policy: maximum allowed reject-ratio increase over the "
+            "default threshold for non-default choices."
+        ),
+    )
+    parser.add_argument(
+        "--max-selected-threshold",
+        type=float,
+        default=0.80,
+        help="Safe policy: maximum threshold allowed for non-default choices.",
+    )
     return parser.parse_args()
 
 
@@ -94,6 +146,54 @@ def choose_best_threshold(group: pd.DataFrame) -> pd.Series:
         ascending=[False, True, True, True],
     )
     return ordered.iloc[0]
+
+
+def choose_safe_threshold(
+    group: pd.DataFrame,
+    default_threshold: float,
+    min_ops_gain_over_default: float,
+    max_p99_regression_over_default: float,
+    max_reject_ratio: float,
+    max_reject_increase_over_default: float,
+    max_selected_threshold: float,
+) -> pd.Series:
+    default_rows = group[(group["threshold"] - default_threshold).abs() < 1e-9]
+    if default_rows.empty:
+        default_row = group.iloc[(group["threshold"] - default_threshold).abs().argmin()]
+    else:
+        default_row = default_rows.iloc[0]
+
+    eligible = group[group["threshold"] <= max_selected_threshold].copy()
+    eligible = eligible[
+        eligible["delta_ops_pct"]
+        >= default_row["delta_ops_pct"] + min_ops_gain_over_default
+    ]
+    eligible = eligible[
+        eligible["delta_p99_pct"]
+        <= default_row["delta_p99_pct"] + max_p99_regression_over_default
+    ]
+    eligible = eligible[eligible["reject_ratio"] <= max_reject_ratio]
+    eligible = eligible[
+        eligible["reject_ratio"]
+        <= default_row["reject_ratio"] + max_reject_increase_over_default
+    ]
+
+    if eligible.empty:
+        chosen = default_row.copy()
+        chosen["selection_reason"] = "fallback_default"
+    else:
+        ordered = eligible.sort_values(
+            by=["delta_ops_pct", "delta_p99_pct", "threshold"],
+            ascending=[False, True, True],
+        )
+        chosen = ordered.iloc[0].copy()
+        chosen["selection_reason"] = "safe_improvement"
+
+    chosen["default_threshold"] = default_threshold
+    chosen["default_delta_ops_pct"] = default_row["delta_ops_pct"]
+    chosen["default_delta_p99_pct"] = default_row["delta_p99_pct"]
+    chosen["default_reject_ratio"] = default_row["reject_ratio"]
+    return chosen
 
 
 def render_cpp_entries(lookup: pd.DataFrame, group_cols: Sequence[str]) -> str:
@@ -142,6 +242,7 @@ def write_report(
     excluded_thresholds: Sequence[float],
     included_seeds: Sequence[str],
     excluded_seeds: Sequence[str],
+    selection_policy: str,
 ) -> None:
     with out_path.open("w", encoding="utf-8") as f:
         f.write("# Dynamic Threshold Lookup Report\n\n")
@@ -160,6 +261,7 @@ def write_report(
             f.write(f"- excluded_seeds: `{', '.join(excluded_seeds)}`\n")
         if included_seeds or excluded_seeds:
             f.write("\n")
+        f.write(f"- selection_policy: `{selection_policy}`\n\n")
 
         f.write("## Selected Thresholds\n\n")
         for _, row in lookup.iterrows():
@@ -221,11 +323,26 @@ def main() -> int:
         filtered.groupby(group_cols + ["threshold"], dropna=False).size().values
     )
 
-    winners = (
-        agg.groupby(group_cols, dropna=False, group_keys=False)
-        .apply(choose_best_threshold)
-        .reset_index(drop=True)
-    )
+    if args.selection_policy == "safe":
+        winners = (
+            agg.groupby(group_cols, dropna=False, group_keys=False)
+            .apply(
+                choose_safe_threshold,
+                default_threshold=args.default_threshold,
+                min_ops_gain_over_default=args.min_ops_gain_over_default,
+                max_p99_regression_over_default=args.max_p99_regression_over_default,
+                max_reject_ratio=args.max_reject_ratio,
+                max_reject_increase_over_default=args.max_reject_increase_over_default,
+                max_selected_threshold=args.max_selected_threshold,
+            )
+            .reset_index(drop=True)
+        )
+    else:
+        winners = (
+            agg.groupby(group_cols, dropna=False, group_keys=False)
+            .apply(choose_best_threshold)
+            .reset_index(drop=True)
+        )
     winners = winners.sort_values(group_cols).reset_index(drop=True)
 
     out_dir = args.output_dir.resolve()
@@ -251,6 +368,7 @@ def main() -> int:
         excluded_thresholds,
         included_seeds,
         excluded_seeds,
+        args.selection_policy,
     )
 
     print(f"Wrote: {agg_csv}")

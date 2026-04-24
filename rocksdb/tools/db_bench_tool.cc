@@ -667,6 +667,51 @@ DEFINE_string(
     "Optional cache label for ML dynamic threshold lookup. If empty, db_bench "
     "derives labels like 32MB/128MB/512MB from --cache_size.");
 
+DEFINE_bool(
+    ml_cache_admission_adaptive_threshold, false,
+    "Enable lightweight sliding-window adaptive correction on top of the "
+    "fixed/dynamic ML admission threshold.");
+
+DEFINE_uint64(
+    ml_cache_admission_adaptive_window, 2000000,
+    "Number of admission candidates per adaptive sliding window.");
+
+DEFINE_double(
+    ml_cache_admission_adaptive_step, 0.01,
+    "Threshold step size for each adaptive raise/lower action.");
+
+DEFINE_double(
+    ml_cache_admission_adaptive_return_step, 0.005,
+    "Threshold step size used to pull the adaptive threshold back toward the "
+    "base threshold when reject ratio is in the target band.");
+
+DEFINE_double(
+    ml_cache_admission_adaptive_reject_low, 0.70,
+    "Adaptive controller low reject-ratio target. Below this threshold the "
+    "runtime threshold is raised.");
+
+DEFINE_double(
+    ml_cache_admission_adaptive_reject_high, 0.95,
+    "Adaptive controller high reject-ratio target. Above this threshold the "
+    "runtime threshold is lowered.");
+
+DEFINE_double(
+    ml_cache_admission_adaptive_min_threshold, 0.35,
+    "Minimum threshold allowed after adaptive correction.");
+
+DEFINE_double(
+    ml_cache_admission_adaptive_max_threshold, 0.75,
+    "Maximum threshold allowed after adaptive correction.");
+
+DEFINE_uint32(
+    ml_cache_admission_adaptive_warmup_windows, 2,
+    "Number of initial adaptive windows to observe before changing threshold.");
+
+DEFINE_uint32(
+    ml_cache_admission_adaptive_consecutive_windows, 2,
+    "Number of consecutive out-of-band windows required before changing "
+    "threshold.");
+
 DEFINE_string(
     cache_admission_snapshot_file, "",
     "If non-empty, periodically dump RocksDB/LSM state snapshots to this CSV.");
@@ -4813,6 +4858,26 @@ class Benchmark {
           FLAGS_ml_cache_admission_cache_label.empty()
               ? MLCacheAdmissionCacheLabel(FLAGS_cache_size)
               : FLAGS_ml_cache_admission_cache_label;
+      block_based_options.ml_cache_admission_adaptive_threshold =
+          FLAGS_ml_cache_admission_adaptive_threshold;
+      block_based_options.ml_cache_admission_adaptive_window =
+          FLAGS_ml_cache_admission_adaptive_window;
+      block_based_options.ml_cache_admission_adaptive_step =
+          FLAGS_ml_cache_admission_adaptive_step;
+      block_based_options.ml_cache_admission_adaptive_return_step =
+          FLAGS_ml_cache_admission_adaptive_return_step;
+      block_based_options.ml_cache_admission_adaptive_reject_low =
+          FLAGS_ml_cache_admission_adaptive_reject_low;
+      block_based_options.ml_cache_admission_adaptive_reject_high =
+          FLAGS_ml_cache_admission_adaptive_reject_high;
+      block_based_options.ml_cache_admission_adaptive_min_threshold =
+          FLAGS_ml_cache_admission_adaptive_min_threshold;
+      block_based_options.ml_cache_admission_adaptive_max_threshold =
+          FLAGS_ml_cache_admission_adaptive_max_threshold;
+      block_based_options.ml_cache_admission_adaptive_warmup_windows =
+          FLAGS_ml_cache_admission_adaptive_warmup_windows;
+      block_based_options.ml_cache_admission_adaptive_consecutive_windows =
+          FLAGS_ml_cache_admission_adaptive_consecutive_windows;
       //project2
 
       block_based_options.cache_index_and_filter_blocks =

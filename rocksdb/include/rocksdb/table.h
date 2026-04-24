@@ -313,8 +313,20 @@ struct BlockBasedTableOptions {
   // the benchmark name and cache size for controlled online experiments.
   std::string ml_cache_admission_workload;
   std::string ml_cache_admission_cache_label;
-  //project2
 
+  // If enabled, apply a lightweight sliding-window controller on top of the
+  // fixed/dynamic base threshold. This keeps the hot path cheap while allowing
+  // bounded runtime correction when reject ratio drifts too high or too low.
+  bool ml_cache_admission_adaptive_threshold = false;
+  uint64_t ml_cache_admission_adaptive_window = 2000000;
+  double ml_cache_admission_adaptive_step = 0.01;
+  double ml_cache_admission_adaptive_return_step = 0.005;
+  double ml_cache_admission_adaptive_reject_low = 0.70;
+  double ml_cache_admission_adaptive_reject_high = 0.95;
+  double ml_cache_admission_adaptive_min_threshold = 0.35;
+  double ml_cache_admission_adaptive_max_threshold = 0.75;
+  uint32_t ml_cache_admission_adaptive_warmup_windows = 2;
+  uint32_t ml_cache_admission_adaptive_consecutive_windows = 2;
 
   // If non-NULL use the specified cache for pages read from device
   // IF NULL, no page cache is used
