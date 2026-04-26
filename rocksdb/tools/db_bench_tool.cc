@@ -2209,7 +2209,7 @@ class PeriodicSnapshotDumper {
 
       ROCKSDB_NAMESPACE::UpdateOnlineCacheAdmissionSnapshot(
           l0_files, l1_files, pending_compaction_bytes, running_compactions,
-          running_flushes, cur_mem, cache_usage, cache_pinned);
+          running_flushes, cur_mem, cache_capacity, cache_usage, cache_pinned);
 
       if (out_.is_open()) {
         std::lock_guard<std::mutex> lg(mu_);

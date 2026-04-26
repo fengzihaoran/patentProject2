@@ -34,6 +34,7 @@ struct OnlineCacheAdmissionSnapshot {
   uint64_t num_running_compactions = 0;
   uint64_t num_running_flushes = 0;
   uint64_t cur_size_all_mem_tables = 0;
+  uint64_t block_cache_capacity = 0;
   uint64_t block_cache_usage = 0;
   uint64_t block_cache_pinned_usage = 0;
 };
@@ -50,6 +51,7 @@ class OnlineCacheAdmissionSnapshotState {
               uint64_t num_running_compactions,
               uint64_t num_running_flushes,
               uint64_t cur_size_all_mem_tables,
+              uint64_t block_cache_capacity,
               uint64_t block_cache_usage,
               uint64_t block_cache_pinned_usage) {
     l0_files_.store(l0_files, std::memory_order_relaxed);
@@ -61,6 +63,7 @@ class OnlineCacheAdmissionSnapshotState {
     num_running_flushes_.store(num_running_flushes, std::memory_order_relaxed);
     cur_size_all_mem_tables_.store(cur_size_all_mem_tables,
                                    std::memory_order_relaxed);
+    block_cache_capacity_.store(block_cache_capacity, std::memory_order_relaxed);
     block_cache_usage_.store(block_cache_usage, std::memory_order_relaxed);
     block_cache_pinned_usage_.store(block_cache_pinned_usage,
                                     std::memory_order_relaxed);
@@ -78,6 +81,8 @@ class OnlineCacheAdmissionSnapshotState {
         num_running_flushes_.load(std::memory_order_relaxed);
     snapshot.cur_size_all_mem_tables =
         cur_size_all_mem_tables_.load(std::memory_order_relaxed);
+    snapshot.block_cache_capacity =
+        block_cache_capacity_.load(std::memory_order_relaxed);
     snapshot.block_cache_usage =
         block_cache_usage_.load(std::memory_order_relaxed);
     snapshot.block_cache_pinned_usage =
@@ -92,6 +97,7 @@ class OnlineCacheAdmissionSnapshotState {
   std::atomic<uint64_t> num_running_compactions_{0};
   std::atomic<uint64_t> num_running_flushes_{0};
   std::atomic<uint64_t> cur_size_all_mem_tables_{0};
+  std::atomic<uint64_t> block_cache_capacity_{0};
   std::atomic<uint64_t> block_cache_usage_{0};
   std::atomic<uint64_t> block_cache_pinned_usage_{0};
 };
@@ -99,12 +105,13 @@ class OnlineCacheAdmissionSnapshotState {
 inline void UpdateOnlineCacheAdmissionSnapshot(
     uint64_t l0_files, uint64_t l1_files, uint64_t pending_compaction_bytes,
     uint64_t num_running_compactions, uint64_t num_running_flushes,
-    uint64_t cur_size_all_mem_tables, uint64_t block_cache_usage,
+    uint64_t cur_size_all_mem_tables, uint64_t block_cache_capacity,
+    uint64_t block_cache_usage,
     uint64_t block_cache_pinned_usage) {
   OnlineCacheAdmissionSnapshotState::Instance().Update(
       l0_files, l1_files, pending_compaction_bytes, num_running_compactions,
-      num_running_flushes, cur_size_all_mem_tables, block_cache_usage,
-      block_cache_pinned_usage);
+      num_running_flushes, cur_size_all_mem_tables, block_cache_capacity,
+      block_cache_usage, block_cache_pinned_usage);
 }
 
 inline OnlineCacheAdmissionSnapshot ReadOnlineCacheAdmissionSnapshot() {
@@ -120,8 +127,11 @@ struct MLCacheAdmissionFeatures {
   double num_running_compactions = 0.0;
   double num_running_flushes = 0.0;
   double cur_size_all_mem_tables = 0.0;
+  double block_cache_capacity = 0.0;
   double block_cache_usage = 0.0;
   double block_cache_pinned_usage = 0.0;
+  double block_cache_usage_ratio = 0.0;
+  double block_cache_pinned_usage_ratio = 0.0;
 };
 
 struct MLCacheAdmissionAdaptiveConfig {
@@ -149,8 +159,11 @@ inline double MLCacheAdmissionPredictLogit(const MLCacheAdmissionFeatures& f) {
       f.num_running_compactions,
       f.num_running_flushes,
       f.cur_size_all_mem_tables,
+      f.block_cache_capacity,
       f.block_cache_usage,
       f.block_cache_pinned_usage,
+      f.block_cache_usage_ratio,
+      f.block_cache_pinned_usage_ratio,
   };
 
   double logit = kIntercept;
@@ -197,10 +210,20 @@ class MLCacheAdmissionRuntime {
         static_cast<double>(snapshot.num_running_flushes);
     features.cur_size_all_mem_tables =
         static_cast<double>(snapshot.cur_size_all_mem_tables);
+    features.block_cache_capacity =
+        static_cast<double>(snapshot.block_cache_capacity);
     features.block_cache_usage =
         static_cast<double>(snapshot.block_cache_usage);
     features.block_cache_pinned_usage =
         static_cast<double>(snapshot.block_cache_pinned_usage);
+    if (snapshot.block_cache_capacity > 0) {
+      features.block_cache_usage_ratio =
+          static_cast<double>(snapshot.block_cache_usage) /
+          static_cast<double>(snapshot.block_cache_capacity);
+      features.block_cache_pinned_usage_ratio =
+          static_cast<double>(snapshot.block_cache_pinned_usage) /
+          static_cast<double>(snapshot.block_cache_capacity);
+    }
 
     const double runtime_threshold =
         ResolveRuntimeThreshold(base_threshold, adaptive_config);
@@ -414,7 +437,9 @@ class MLCacheAdmissionRuntime {
         "reject_ratio=%.6f last_prob=%.6f last_decision=%d threshold=%.6f "
         "base_threshold=%.6f adaptive_delta=%.6f "
         "l0_files=%.0f l1_files=%.0f pending_compaction=%.0f "
-        "cache_usage=%.0f cache_pinned=%.0f block_size=%.0f level=%.0f\n",
+        "cache_capacity=%.0f cache_usage=%.0f cache_pinned=%.0f "
+        "cache_usage_ratio=%.6f cache_pinned_ratio=%.6f "
+        "block_size=%.0f level=%.0f\n",
         static_cast<unsigned long long>(total),
         static_cast<unsigned long long>(admit_cnt),
         static_cast<unsigned long long>(reject_cnt),
@@ -428,8 +453,11 @@ class MLCacheAdmissionRuntime {
         f.l0_files,
         f.l1_files,
         f.estimate_pending_compaction_bytes,
+        f.block_cache_capacity,
         f.block_cache_usage,
         f.block_cache_pinned_usage,
+        f.block_cache_usage_ratio,
+        f.block_cache_pinned_usage_ratio,
         f.block_size,
         f.level);
   }

@@ -5,6 +5,8 @@ set -euo pipefail
 #
 # Default use case:
 #   rebuild multireadrandom datasets after fixing builder-side parsing bugs.
+# This is a legacy single-workload helper. The final paper path should use
+# build_final_paper_matrix_datasets.sh, which supports JOBS-based parallelism.
 #
 # It expects the run directories to already contain:
 #   snapshot.csv
@@ -24,10 +26,14 @@ DATASET_BUILDER="${DATASET_BUILDER:-/home/qhsf5/yuej/patentProject2/python/scrip
 TRACE_ANALYZER="${TRACE_ANALYZER:-/home/qhsf5/yuej/patentProject2/rocksdb/cmake-build-release/block_cache_trace_analyzer}"
 
 HORIZON_SECONDS="${HORIZON_SECONDS:-5}"
-POSITIVE_REUSE_THRESHOLD="${POSITIVE_REUSE_THRESHOLD:-8}"
-CANDIDATE_COOLDOWN_MS="${CANDIDATE_COOLDOWN_MS:-3000}"
+POSITIVE_REUSE_THRESHOLD="${POSITIVE_REUSE_THRESHOLD:-6}"
+CANDIDATE_COOLDOWN_MS="${CANDIDATE_COOLDOWN_MS:-1000}"
 MAX_FIRST_REUSE_SECONDS="${MAX_FIRST_REUSE_SECONDS:-3}"
 MIN_BENEFIT_SCORE="${MIN_BENEFIT_SCORE:-0.05}"
+FUTURE_REUSE_COUNT_MODE="${FUTURE_REUSE_COUNT_MODE:-unique_get}"
+INCLUDE_NO_INSERT="${INCLUDE_NO_INSERT:-0}"
+DATA_BLOCK_TYPES="${DATA_BLOCK_TYPES:-9}"
+TRACE_LOADER="${TRACE_LOADER:-polars}"
 
 split_csv() {
   local csv="$1"
@@ -102,6 +108,7 @@ for db_label in "${DB_LABELS[@]}"; do
       fi
 
       builder_args=(
+        --trace-loader "$TRACE_LOADER"
         --block-trace "$block_txt"
         --snapshot-csv "$snapshot_csv"
         --sst-trace-tsv "$sst_tsv"
@@ -111,7 +118,12 @@ for db_label in "${DB_LABELS[@]}"; do
         --candidate-cooldown-ms "$CANDIDATE_COOLDOWN_MS"
         --max-first-reuse-seconds "$MAX_FIRST_REUSE_SECONDS"
         --min-benefit-score "$MIN_BENEFIT_SCORE"
+        --future-reuse-count-mode "$FUTURE_REUSE_COUNT_MODE"
+        --data-block-types "$DATA_BLOCK_TYPES"
       )
+      if [[ "$INCLUDE_NO_INSERT" == "1" ]]; then
+        builder_args+=(--include-no-insert)
+      fi
       append_builder_args "$WORKLOAD" builder_args
 
       echo "[DATASET] db=$db_label workload=$WORKLOAD cache=$cache_label seed=$seed"

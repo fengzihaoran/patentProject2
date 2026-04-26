@@ -8,11 +8,13 @@ Typical usage:
 3) get a lookup table that maps runtime regimes to a fixed threshold
 
 Current v1 groups by:
-- db_label
 - workload
 - cache_label
 
-This is a pragmatic first step before introducing finer runtime-state buckets.
+It intentionally excludes db_label, seed, and read_random_exp_range by default
+because the current online RocksDB lookup only receives workload/cache metadata.
+This avoids generating duplicate online keys and makes the policy less tied to
+one calibration database.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from typing import Dict, List, Sequence
 import pandas as pd
 
 
-DEFAULT_GROUP_BY = "db_label,workload,cache_label"
+DEFAULT_GROUP_BY = "workload,cache_label"
 DEFAULT_OUTPUT_DIR = Path("python/output/dynamic_threshold_lookup")
 
 

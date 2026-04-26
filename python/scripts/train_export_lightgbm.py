@@ -1,37 +1,21 @@
 #!/usr/bin/env python3
 """
-Train and export a logistic-regression cache-admission model aligned with the
-online C++ admission gate.
+Train a LightGBM cache-admission model for offline comparison.
+
+This script intentionally uses the same lightweight online feature set as
+train_export_logreg.py, so the offline result is directly comparable with the
+current deployed logistic-regression gate. It does not emit a RocksDB .inc
+deployment file yet; tree-model deployment should be decided only after the
+offline metrics are clearly better.
 
 Outputs:
-- final_model_params.json: intercept, means, scales, weights, feature order
-- ml_cache_admission_params.inc: C++ snippet for ml_cache_admission.h
-- oof_predictions.csv: leave-one-run-out out-of-fold predictions
-- threshold_metrics.csv: pooled metrics for requested thresholds
+- lightgbm_model.txt: LightGBM text model
+- lightgbm_model.json: LightGBM dumped tree structure
+- final_model_params.json: feature order and hyperparameters
+- feature_importance.csv: gain/split importances
+- oof_predictions.csv: grouped out-of-fold predictions
+- threshold_metrics.csv: pooled threshold metrics
 - report.md: compact training/evaluation summary
-
-Sample:
-python /home/qhsf5/yuej/patentProject2/python/scripts/train_export_logreg.py \
-  --data-root /yuejData/rocksdb_exp/final_paper_matrix_directio \
-  --include-workloads readrandom,multireadrandom,readwhilewriting \
-  --output-dir /home/qhsf5/yuej/patentProject2/python/output/train_export_logreg_pointlookup_directio \
-  --thresholds 0.20,0.25,0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.70,0.80,0.90 \
-  --class-weight balanced \
-  --c 1.0 \
-  --solver lbfgs \
-  --max-iter 1000 \
-  --train-max-rows-per-run 50000 \
-  --read-sample-count-lines \
-  --oof-max-rows-per-run 10000
-
-  这条命令的含义：
-    最终模型每个 run 最多用 50000 行，54 个 run 大约最多 270万 行，足够训练 10 维逻辑回归。
-    离线 OOF 指标每个 run 用 10000 行，避免 54 折全量训练拖死。
-    如果还慢，把 --train-max-rows-per-run 改成 20000，--oof-max-rows-per-run 改成 5000。
-
-  如果你想更稳，可以后面把：
-    --train-max-rows-per-run 100000
-    --oof-max-rows-per-run 20000
 """
 
 from __future__ import annotations
@@ -40,22 +24,17 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.impute import SimpleImputer
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     average_precision_score,
     confusion_matrix,
-    f1_score,
     precision_recall_fscore_support,
     roc_auc_score,
 )
-from sklearn.model_selection import LeaveOneGroupOut
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import GroupKFold, LeaveOneGroupOut
 
 
 LABEL_COLUMN = "label"
@@ -86,7 +65,7 @@ ONLINE_LITE_FEATURES = [
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train/export a logistic-regression admission model."
+        description="Train a LightGBM admission model for offline evaluation."
     )
     parser.add_argument(
         "--data-root",
@@ -118,25 +97,61 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("python/output/train_export_logreg"),
+        default=Path("python/output/train_export_lightgbm"),
         help="Directory for exported artifacts.",
     )
     parser.add_argument(
         "--thresholds",
-        default="0.50,0.55,0.60",
+        default="0.35,0.40,0.45,0.50,0.55,0.60,0.65,0.70,0.75,0.80",
         help="Comma-separated decision thresholds to evaluate.",
     )
     parser.add_argument(
-        "--c",
-        type=float,
-        default=1.0,
-        help="Inverse regularization strength for LogisticRegression.",
+        "--num-leaves",
+        type=int,
+        default=15,
+        help="LightGBM num_leaves. Keep small for possible online deployment.",
     )
     parser.add_argument(
-        "--max-iter",
+        "--max-depth",
         type=int,
-        default=2000,
-        help="Max iterations for LogisticRegression.",
+        default=4,
+        help="LightGBM max_depth. Keep small for possible online deployment.",
+    )
+    parser.add_argument(
+        "--n-estimators",
+        type=int,
+        default=80,
+        help="Number of boosting trees.",
+    )
+    parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=0.05,
+        help="Boosting learning rate.",
+    )
+    parser.add_argument(
+        "--min-child-samples",
+        type=int,
+        default=200,
+        help="Minimum samples in a leaf.",
+    )
+    parser.add_argument(
+        "--subsample",
+        type=float,
+        default=0.8,
+        help="Row subsampling fraction.",
+    )
+    parser.add_argument(
+        "--colsample-bytree",
+        type=float,
+        default=0.8,
+        help="Feature subsampling fraction.",
+    )
+    parser.add_argument(
+        "--reg-lambda",
+        type=float,
+        default=1.0,
+        help="L2 regularization.",
     )
     parser.add_argument(
         "--class-weight",
@@ -150,9 +165,8 @@ def parse_args() -> argparse.Namespace:
         choices=["none", "positive_benefit_log", "positive_benefit_linear"],
         help=(
             "Optional training-time sample weighting. positive_benefit_log "
-            "keeps negative rows near weight 1 and upweights positive rows by "
-            "log1p(benefit_score). This biases the model toward admitting "
-            "high-benefit blocks without changing online features. Default: none."
+            "upweights positive rows by log1p(benefit_score) so the model "
+            "focuses on high-benefit cached blocks. Default: none."
         ),
     )
     parser.add_argument(
@@ -162,44 +176,41 @@ def parse_args() -> argparse.Namespace:
         help="Clip sample weights to this max before mean-normalization. Default: 8.0.",
     )
     parser.add_argument(
+        "--oof-mode",
+        default="group-kfold",
+        choices=["group-kfold", "leave-one-run-out", "none"],
+        help="Grouped out-of-fold evaluation mode.",
+    )
+    parser.add_argument(
+        "--n-splits",
+        type=int,
+        default=5,
+        help="Number of GroupKFold splits when --oof-mode=group-kfold.",
+    )
+    parser.add_argument(
         "--min-test-rows",
         type=int,
         default=1,
-        help="Skip leave-one-run-out fold when test rows are below this threshold.",
-    )
-    parser.add_argument(
-        "--solver",
-        default="liblinear",
-        choices=["liblinear", "lbfgs"],
-        help="LogisticRegression solver.",
+        help="Skip OOF fold when test rows are below this threshold.",
     )
     parser.add_argument(
         "--oof-max-rows-per-run",
         type=int,
-        default=0,
-        help=(
-            "Use at most this many rows per run for leave-one-run-out OOF "
-            "evaluation. 0 means full OOF. Final exported model still trains "
-            "on the full loaded training data unless --train-max-rows-per-run "
-            "is set. Default: 0."
-        ),
+        default=30000,
+        help="Use at most this many rows per run for OOF evaluation. 0 means full OOF.",
     )
     parser.add_argument(
         "--train-max-rows-per-run",
         type=int,
-        default=0,
-        help=(
-            "Use at most this many rows per run for final model training. "
-            "0 means use all rows. Default: 0."
-        ),
+        default=200000,
+        help="Use at most this many rows per run for final model training. 0 means full.",
     )
     parser.add_argument(
         "--read-sample-count-lines",
         action="store_true",
         help=(
             "When --train-max-rows-per-run is set, count CSV rows first and "
-            "parse only randomly selected row numbers. This avoids parsing "
-            "multi-GB CSV files just to sample them."
+            "parse only randomly selected row numbers."
         ),
     )
     parser.add_argument(
@@ -207,6 +218,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=42,
         help="Random seed.",
+    )
+    parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=-1,
+        help="LightGBM training threads.",
     )
     return parser.parse_args()
 
@@ -226,25 +243,6 @@ def find_dataset_files(args: argparse.Namespace) -> List[Path]:
     return files
 
 
-def filter_dataset_paths_by_workload(
-    paths: Sequence[Path],
-    data_root: Path,
-    include_workloads: Sequence[str],
-    exclude_workloads: Sequence[str],
-) -> List[Path]:
-    filtered: List[Path] = []
-    for path in paths:
-        workload = infer_workload(path, data_root)
-        if include_workloads and workload not in include_workloads:
-            continue
-        if exclude_workloads and workload in exclude_workloads:
-            continue
-        filtered.append(path)
-    if not filtered:
-        raise ValueError("No dataset files left after workload path filtering.")
-    return filtered
-
-
 def infer_run_id(dataset_path: Path, data_root: Path) -> str:
     try:
         rel = dataset_path.resolve().relative_to(data_root.resolve())
@@ -262,6 +260,25 @@ def infer_workload(dataset_path: Path, data_root: Path) -> str:
         return parts[0] if parts else "unknown"
     except Exception:
         return "unknown"
+
+
+def filter_dataset_paths_by_workload(
+    paths: Sequence[Path],
+    data_root: Path,
+    include_workloads: Sequence[str],
+    exclude_workloads: Sequence[str],
+) -> List[Path]:
+    filtered: List[Path] = []
+    for path in paths:
+        workload = infer_workload(path, data_root)
+        if include_workloads and workload not in include_workloads:
+            continue
+        if exclude_workloads and workload in exclude_workloads:
+            continue
+        filtered.append(path)
+    if not filtered:
+        raise ValueError("No dataset files left after workload path filtering.")
+    return filtered
 
 
 def dataset_dtypes(
@@ -292,9 +309,9 @@ def sampled_skiprows(path: Path, sample_size: int, random_state: int):
     if sample_size <= 0 or total_rows <= sample_size:
         return None, total_rows
     rng = np.random.default_rng(stable_path_seed(path, random_state))
-    # pandas passes row index 0 for the header, and 1..N for data rows.
     keep_rows = set(
-        int(row_idx) for row_idx in rng.choice(total_rows, size=sample_size, replace=False) + 1
+        int(row_idx)
+        for row_idx in rng.choice(total_rows, size=sample_size, replace=False) + 1
     )
 
     def should_skip(row_idx: int) -> bool:
@@ -403,7 +420,9 @@ def sample_weight_columns(args: argparse.Namespace) -> List[str]:
     return [BENEFIT_SCORE_COLUMN]
 
 
-def compute_sample_weights(df: pd.DataFrame, args: argparse.Namespace) -> Optional[np.ndarray]:
+def compute_sample_weights(
+    df: pd.DataFrame, args: argparse.Namespace
+) -> Optional[np.ndarray]:
     if args.sample_weight_mode == "none":
         return None
     if BENEFIT_SCORE_COLUMN not in df.columns:
@@ -430,23 +449,31 @@ def compute_sample_weights(df: pd.DataFrame, args: argparse.Namespace) -> Option
     return weights
 
 
-def make_pipeline(args: argparse.Namespace) -> Pipeline:
+def make_model(args: argparse.Namespace) -> LGBMClassifier:
+    try:
+        from lightgbm import LGBMClassifier
+    except ImportError as exc:  # pragma: no cover - exercised on server env.
+        raise SystemExit(
+            "Missing dependency: lightgbm. Install it in the training environment, "
+            "for example: pip install lightgbm"
+        ) from exc
+
     class_weight = None if args.class_weight == "none" else args.class_weight
-    return Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="mean")),
-            ("scaler", StandardScaler()),
-            (
-                "model",
-                LogisticRegression(
-                    C=args.c,
-                    max_iter=args.max_iter,
-                    class_weight=class_weight,
-                    solver=args.solver,
-                    random_state=args.random_state,
-                ),
-            ),
-        ]
+    return LGBMClassifier(
+        objective="binary",
+        n_estimators=args.n_estimators,
+        learning_rate=args.learning_rate,
+        num_leaves=args.num_leaves,
+        max_depth=args.max_depth,
+        min_child_samples=args.min_child_samples,
+        subsample=args.subsample,
+        subsample_freq=1 if args.subsample < 1.0 else 0,
+        colsample_bytree=args.colsample_bytree,
+        reg_lambda=args.reg_lambda,
+        class_weight=class_weight,
+        random_state=args.random_state,
+        n_jobs=args.n_jobs,
+        verbosity=-1,
     )
 
 
@@ -474,31 +501,45 @@ def evaluate_at_threshold(
     }
 
 
-def run_leave_one_run_out(
+def build_group_splits(
+    x: pd.DataFrame, y: np.ndarray, groups: np.ndarray, args: argparse.Namespace
+):
+    unique_groups = np.unique(groups)
+    if args.oof_mode == "none":
+        return []
+    if args.oof_mode == "leave-one-run-out":
+        return list(LeaveOneGroupOut().split(x, y, groups))
+    n_splits = min(args.n_splits, len(unique_groups))
+    if n_splits < 2:
+        raise ValueError("Need at least two groups for grouped OOF evaluation.")
+    return list(GroupKFold(n_splits=n_splits).split(x, y, groups))
+
+
+def run_grouped_oof(
     df: pd.DataFrame, feature_names: Sequence[str], args: argparse.Namespace
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
     x = df[list(feature_names)].copy()
     y = df[LABEL_COLUMN].to_numpy()
     groups = df[RUN_COLUMN].to_numpy()
+    splits = build_group_splits(x, y, groups, args)
+    if not splits:
+        raise ValueError("OOF evaluation disabled; no OOF metrics to report.")
 
-    logo = LeaveOneGroupOut()
     rows: List[pd.DataFrame] = []
-
-    for fold_idx, (train_idx, test_idx) in enumerate(logo.split(x, y, groups), start=1):
+    for fold_idx, (train_idx, test_idx) in enumerate(splits, start=1):
         if len(test_idx) < args.min_test_rows:
             continue
         print(
             f"[OOF] fold={fold_idx} train_rows={len(train_idx)} test_rows={len(test_idx)}",
             flush=True,
         )
-        pipe = make_pipeline(args)
-        sample_weights = compute_sample_weights(df.iloc[train_idx], args)
-        fit_kwargs = {}
-        if sample_weights is not None:
-            fit_kwargs["model__sample_weight"] = sample_weights
-        pipe.fit(x.iloc[train_idx], y[train_idx], **fit_kwargs)
-        y_prob = pipe.predict_proba(x.iloc[test_idx])[:, 1]
-
+        model = make_model(args)
+        model.fit(
+            x.iloc[train_idx],
+            y[train_idx],
+            sample_weight=compute_sample_weights(df.iloc[train_idx], args),
+        )
+        y_prob = model.predict_proba(x.iloc[test_idx])[:, 1]
         fold_df = df.iloc[test_idx][[RUN_COLUMN, DATASET_COLUMN, WORKLOAD_COLUMN]].copy()
         fold_df["fold"] = fold_idx
         fold_df["y_true"] = y[test_idx]
@@ -511,7 +552,6 @@ def run_leave_one_run_out(
     oof = pd.concat(rows, ignore_index=True)
     y_true = oof["y_true"].to_numpy()
     y_prob = oof["y_prob"].to_numpy()
-
     summary = {
         "num_rows": float(len(df)),
         "num_runs": float(df[RUN_COLUMN].nunique()),
@@ -526,59 +566,52 @@ def run_leave_one_run_out(
 
 def fit_final_model(
     df: pd.DataFrame, feature_names: Sequence[str], args: argparse.Namespace
-) -> Pipeline:
-    pipe = make_pipeline(args)
-    sample_weights = compute_sample_weights(df, args)
-    fit_kwargs = {}
-    if sample_weights is not None:
-        fit_kwargs["model__sample_weight"] = sample_weights
-    pipe.fit(df[list(feature_names)], df[LABEL_COLUMN].to_numpy(), **fit_kwargs)
-    return pipe
+) -> LGBMClassifier:
+    model = make_model(args)
+    model.fit(
+        df[list(feature_names)],
+        df[LABEL_COLUMN].to_numpy(),
+        sample_weight=compute_sample_weights(df, args),
+    )
+    return model
 
 
-def export_params(
-    pipe: Pipeline, feature_names: Sequence[str], args: argparse.Namespace
+def write_feature_importance(
+    model: LGBMClassifier, feature_names: Sequence[str], output_dir: Path
+) -> None:
+    booster = model.booster_
+    rows = []
+    for name, gain, split in zip(
+        feature_names,
+        booster.feature_importance(importance_type="gain"),
+        booster.feature_importance(importance_type="split"),
+    ):
+        rows.append({"feature": name, "importance_gain": gain, "importance_split": split})
+    pd.DataFrame(rows).sort_values(
+        ["importance_gain", "importance_split"], ascending=[False, False]
+    ).to_csv(output_dir / "feature_importance.csv", index=False)
+
+
+def model_metadata(
+    model: LGBMClassifier, feature_names: Sequence[str], args: argparse.Namespace
 ) -> Dict[str, object]:
-    scaler: StandardScaler = pipe.named_steps["scaler"]
-    model: LogisticRegression = pipe.named_steps["model"]
     return {
+        "model_type": "lightgbm",
         "feature_names": list(feature_names),
-        "intercept": float(model.intercept_[0]),
-        "means": [float(x) for x in scaler.mean_.tolist()],
-        "scales": [float(x if x != 0.0 else 1.0) for x in scaler.scale_.tolist()],
-        "weights": [float(x) for x in model.coef_[0].tolist()],
+        "objective": "binary",
+        "num_trees": int(model.booster_.num_trees()),
+        "num_leaves": args.num_leaves,
+        "max_depth": args.max_depth,
+        "n_estimators": args.n_estimators,
+        "learning_rate": args.learning_rate,
+        "min_child_samples": args.min_child_samples,
+        "subsample": args.subsample,
+        "colsample_bytree": args.colsample_bytree,
+        "reg_lambda": args.reg_lambda,
+        "class_weight": args.class_weight,
         "sample_weight_mode": args.sample_weight_mode,
         "sample_weight_max": args.sample_weight_max,
     }
-
-
-def format_cpp_array(values: Sequence[float], indent: str = "      ") -> str:
-    parts = [f"{v:.17g}" for v in values]
-    lines: List[str] = []
-    for i in range(0, len(parts), 3):
-        chunk = ", ".join(parts[i : i + 3])
-        suffix = "," if i + 3 < len(parts) else ""
-        lines.append(f"{indent}{chunk}{suffix}")
-    return "\n".join(lines)
-
-
-def build_cpp_snippet(params: Dict[str, object]) -> str:
-    features = params["feature_names"]
-    comments = "\n".join(
-        f"  // [{idx}] {name}" for idx, name in enumerate(features)
-    )
-    return (
-        "// Auto-generated by python/scripts/train_export_logreg.py\n"
-        "// Feature order must match MLCacheAdmissionFeatures.\n"
-        f"{comments}\n"
-        f"  static constexpr double kIntercept = {params['intercept']:.17g};\n\n"
-        "  static constexpr double kMeans[] = {\n"
-        f"{format_cpp_array(params['means'])}}};\n\n"
-        "  static constexpr double kScales[] = {\n"
-        f"{format_cpp_array(params['scales'])}}};\n\n"
-        "  static constexpr double kWeights[] = {\n"
-        f"{format_cpp_array(params['weights'])}}};\n"
-    )
 
 
 def write_report(
@@ -588,11 +621,14 @@ def write_report(
     params: Dict[str, object],
     workloads: Sequence[str],
     dataset_files: Sequence[Path],
+    args: argparse.Namespace,
 ) -> None:
     report_path = output_dir / "report.md"
-    best_row = threshold_metrics.sort_values(["f1", "threshold"], ascending=[False, True]).iloc[0]
+    best_row = threshold_metrics.sort_values(
+        ["f1", "threshold"], ascending=[False, True]
+    ).iloc[0]
     with report_path.open("w", encoding="utf-8") as f:
-        f.write("# Logistic Regression Export Report\n\n")
+        f.write("# LightGBM Training Report\n\n")
         f.write("## Data\n\n")
         f.write(f"- datasets: `{len(dataset_files)}`\n")
         f.write(f"- workloads: `{', '.join(workloads)}`\n")
@@ -600,9 +636,11 @@ def write_report(
         if "num_oof_rows" in summary:
             f.write(f"- oof_rows: `{int(summary['num_oof_rows'])}`\n")
         f.write(f"- runs: `{int(summary['num_runs'])}`\n")
-        f.write(f"- positive_ratio: `{summary['label_pos_ratio']:.6f}`\n\n")
+        f.write(f"- positive_ratio: `{summary['label_pos_ratio']:.6f}`\n")
         f.write(f"- sample_weight_mode: `{summary.get('sample_weight_mode', 'none')}`\n\n")
+
         f.write("## Pooled OOF Metrics\n\n")
+        f.write(f"- oof_mode: `{args.oof_mode}`\n")
         f.write(f"- roc_auc: `{summary['roc_auc']:.6f}`\n")
         f.write(f"- pr_auc: `{summary['pr_auc']:.6f}`\n")
         f.write(
@@ -610,12 +648,31 @@ def write_report(
             f"(f1=`{best_row['f1']:.6f}`, precision=`{best_row['precision']:.6f}`, "
             f"recall=`{best_row['recall']:.6f}`)\n\n"
         )
-        f.write("## Feature Order\n\n")
+
+        f.write("## Model\n\n")
+        for key in [
+            "num_trees",
+            "num_leaves",
+            "max_depth",
+            "n_estimators",
+            "learning_rate",
+            "min_child_samples",
+            "subsample",
+            "colsample_bytree",
+            "reg_lambda",
+            "class_weight",
+        ]:
+            f.write(f"- {key}: `{params[key]}`\n")
+
+        f.write("\n## Feature Order\n\n")
         for idx, name in enumerate(params["feature_names"]):
             f.write(f"- `{idx}`: `{name}`\n")
+
         f.write("\n## Artifacts\n\n")
+        f.write("- `lightgbm_model.txt`\n")
+        f.write("- `lightgbm_model.json`\n")
         f.write("- `final_model_params.json`\n")
-        f.write("- `ml_cache_admission_params.inc`\n")
+        f.write("- `feature_importance.csv`\n")
         f.write("- `oof_predictions.csv`\n")
         f.write("- `threshold_metrics.csv`\n")
 
@@ -639,6 +696,7 @@ def main() -> None:
         f"(found={len(all_dataset_files)}) output_dir={output_dir}",
         flush=True,
     )
+
     df = load_datasets(
         dataset_files,
         data_root,
@@ -666,32 +724,45 @@ def main() -> None:
             f"max_rows_per_run={args.oof_max_rows_per_run}",
             flush=True,
         )
-    oof, summary = run_leave_one_run_out(oof_df, ONLINE_LITE_FEATURES, args)
+    oof, summary = run_grouped_oof(oof_df, ONLINE_LITE_FEATURES, args)
     summary["num_rows"] = float(len(df))
     summary["num_oof_rows"] = float(len(oof_df))
     summary["num_runs"] = float(df[RUN_COLUMN].nunique())
     summary["label_pos_ratio"] = float(df[LABEL_COLUMN].mean())
+    summary["sample_weight_mode"] = args.sample_weight_mode
+
     y_true = oof["y_true"].to_numpy()
     y_prob = oof["y_prob"].to_numpy()
-
     threshold_rows = [evaluate_at_threshold(y_true, y_prob, thr) for thr in thresholds]
     threshold_metrics = pd.DataFrame(threshold_rows).sort_values("threshold")
     threshold_metrics.to_csv(output_dir / "threshold_metrics.csv", index=False)
     oof.to_csv(output_dir / "oof_predictions.csv", index=False)
 
-    final_pipe = fit_final_model(df, ONLINE_LITE_FEATURES, args)
-    params = export_params(final_pipe, ONLINE_LITE_FEATURES, args)
+    final_model = fit_final_model(df, ONLINE_LITE_FEATURES, args)
+    booster = final_model.booster_
+    booster.save_model(str(output_dir / "lightgbm_model.txt"))
+    with (output_dir / "lightgbm_model.json").open("w", encoding="utf-8") as f:
+        json.dump(booster.dump_model(), f)
+    params = model_metadata(final_model, ONLINE_LITE_FEATURES, args)
     with (output_dir / "final_model_params.json").open("w", encoding="utf-8") as f:
         json.dump(params, f, indent=2)
-    (output_dir / "ml_cache_admission_params.inc").write_text(
-        build_cpp_snippet(params), encoding="utf-8"
-    )
+    write_feature_importance(final_model, ONLINE_LITE_FEATURES, output_dir)
 
     workloads = sorted(df[WORKLOAD_COLUMN].unique().tolist())
-    write_report(output_dir, summary, threshold_metrics, params, workloads, dataset_files)
+    write_report(
+        output_dir,
+        summary,
+        threshold_metrics,
+        params,
+        workloads,
+        dataset_files,
+        args,
+    )
 
+    print(f"Wrote: {output_dir / 'lightgbm_model.txt'}")
+    print(f"Wrote: {output_dir / 'lightgbm_model.json'}")
     print(f"Wrote: {output_dir / 'final_model_params.json'}")
-    print(f"Wrote: {output_dir / 'ml_cache_admission_params.inc'}")
+    print(f"Wrote: {output_dir / 'feature_importance.csv'}")
     print(f"Wrote: {output_dir / 'oof_predictions.csv'}")
     print(f"Wrote: {output_dir / 'threshold_metrics.csv'}")
     print(f"Wrote: {output_dir / 'report.md'}")

@@ -42,20 +42,20 @@ SUMMARY_PY="${SUMMARY_PY:-/home/qhsf5/yuej/patentProject2/python/scripts/rebuild
 OUT_ROOT="${OUT_ROOT:-/yuejData/rocksdb_exp/online_eval_one_workload_debug}"
 RUN_DB_ROOT="${RUN_DB_ROOT:-$OUT_ROOT/_run_dbs}"
 
-DB_PATH="${DB_PATH:-/yuejData/rocksdb_exp/db_10m_pristine}"
-DB_LABEL="${DB_LABEL:-10M}"
-NUM="${NUM:-10000000}"
+DB_PATH="${DB_PATH:-/yuejData/rocksdb_exp/db_k24_v400_20m_pristine}"
+DB_LABEL="${DB_LABEL:-k24_v400_20m}"
+NUM="${NUM:-20000000}"
 DB_PATHS_CSV="${DB_PATHS_CSV:-}"
 DB_LABELS_CSV="${DB_LABELS_CSV:-}"
 NUMS_CSV="${NUMS_CSV:-}"
 
 WORKLOAD="${WORKLOAD:-}"
 WORKLOADS_CSV="${WORKLOADS_CSV:-}"
-CACHE_SIZES_CSV="${CACHE_SIZES_CSV:-33554432,67108864,134217728,268435456,536870912}"
+CACHE_SIZES_CSV="${CACHE_SIZES_CSV:-33554432,134217728,268435456,536870912}"
 SEEDS_CSV="${SEEDS_CSV:-101,202,303}"
-READ_RANDOM_EXP_RANGE_CSV="${READ_RANDOM_EXP_RANGE_CSV:-0}"
-LOW_THRESHOLDS_CSV="${LOW_THRESHOLDS_CSV:-0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45}"
-INCLUDE_NODATACACHE="${INCLUDE_NODATACACHE:-1}"
+READ_RANDOM_EXP_RANGE_CSV="${READ_RANDOM_EXP_RANGE_CSV:-2,4,6}"
+LOW_THRESHOLDS_CSV="${LOW_THRESHOLDS_CSV:-0.45,0.50,0.55}"
+INCLUDE_NODATACACHE="${INCLUDE_NODATACACHE:-0}"
 NODATACACHE_THRESHOLD="${NODATACACHE_THRESHOLD:-1.10}"
 INCLUDE_DYNAMIC_THRESHOLD="${INCLUDE_DYNAMIC_THRESHOLD:-0}"
 DYNAMIC_FALLBACK_THRESHOLD="${DYNAMIC_FALLBACK_THRESHOLD:-0.45}"
@@ -74,8 +74,10 @@ ADAPTIVE_CONSECUTIVE_WINDOWS="${ADAPTIVE_CONSECUTIVE_WINDOWS:-2}"
 THREADS="${THREADS:-16}"
 READ_ONLY_DURATION="${READ_ONLY_DURATION:-180}"
 MIXED_RW_DURATION="${MIXED_RW_DURATION:-300}"
-KEY_SIZE="${KEY_SIZE:-20}"
-VALUE_SIZE="${VALUE_SIZE:-100}"
+KEY_SIZE="${KEY_SIZE:-24}"
+VALUE_SIZE="${VALUE_SIZE:-400}"
+KEY_SIZES_CSV="${KEY_SIZES_CSV:-}"
+VALUE_SIZES_CSV="${VALUE_SIZES_CSV:-}"
 COMPRESSION_TYPE="${COMPRESSION_TYPE:-none}"
 CACHE_INDEX_AND_FILTER_BLOCKS="${CACHE_INDEX_AND_FILTER_BLOCKS:-false}"
 USE_DIRECT_READS="${USE_DIRECT_READS:-true}"
@@ -271,9 +273,9 @@ run_one() {
     rm -rf "$work_db_dir"
   fi
 
-  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
     "$DB_LABEL" "$workload" "$cache_size" "$cache_label" "$seed" "$duration_sec" \
-    "$read_random_exp_range" "$read_random_exp_label" "$variant" "$threshold" "$run_dir" "$stdout_log" "$stderr_log" "$snapshot_csv" \
+    "$KEY_SIZE" "$VALUE_SIZE" "$read_random_exp_range" "$read_random_exp_label" "$variant" "$threshold" "$run_dir" "$stdout_log" "$stderr_log" "$snapshot_csv" \
     >> "$RUN_MANIFEST_CSV"
 }
 
@@ -298,8 +300,31 @@ else
   NUMS=("$NUM")
 fi
 
+if [[ -n "$KEY_SIZES_CSV" ]]; then
+  split_csv "$KEY_SIZES_CSV" KEY_SIZES
+else
+  KEY_SIZES=()
+  for _ in "${DB_PATHS[@]}"; do
+    KEY_SIZES+=("$KEY_SIZE")
+  done
+fi
+
+if [[ -n "$VALUE_SIZES_CSV" ]]; then
+  split_csv "$VALUE_SIZES_CSV" VALUE_SIZES
+else
+  VALUE_SIZES=()
+  for _ in "${DB_PATHS[@]}"; do
+    VALUE_SIZES+=("$VALUE_SIZE")
+  done
+fi
+
 if [[ "${#DB_PATHS[@]}" -ne "${#DB_LABELS[@]}" || "${#DB_PATHS[@]}" -ne "${#NUMS[@]}" ]]; then
   echo "[ERR] DB_PATHS_CSV, DB_LABELS_CSV, and NUMS_CSV must have the same length." >&2
+  exit 1
+fi
+
+if [[ "${#DB_PATHS[@]}" -ne "${#KEY_SIZES[@]}" || "${#DB_PATHS[@]}" -ne "${#VALUE_SIZES[@]}" ]]; then
+  echo "[ERR] KEY_SIZES_CSV and VALUE_SIZES_CSV must be empty or match DB_PATHS_CSV length." >&2
   exit 1
 fi
 
@@ -337,12 +362,13 @@ THRESHOLD_SUMMARY_CSV="$OUT_ROOT/threshold_summary.csv"
 WORKLOAD_THRESHOLD_SUMMARY_CSV="$OUT_ROOT/workload_threshold_summary.csv"
 REPORT_MD="$OUT_ROOT/report.md"
 
-echo "db_label,workload,cache_size,cache_label,seed,duration_sec,read_random_exp_range,read_random_exp_label,variant,threshold,run_dir,stdout_log,stderr_log,snapshot_csv" > "$RUN_MANIFEST_CSV"
+echo "db_label,workload,cache_size,cache_label,seed,duration_sec,key_size,value_size,read_random_exp_range,read_random_exp_label,variant,threshold,run_dir,stdout_log,stderr_log,snapshot_csv" > "$RUN_MANIFEST_CSV"
 
 echo "[INFO] OUT_ROOT=$OUT_ROOT"
 echo "[INFO] DB_PATHS=${DB_PATHS[*]}"
 echo "[INFO] DB_LABELS=${DB_LABELS[*]}"
 echo "[INFO] NUMS=${NUMS[*]}"
+echo "[INFO] KEY_SIZES=${KEY_SIZES[*]} VALUE_SIZES=${VALUE_SIZES[*]}"
 echo "[INFO] WORKLOADS=${WORKLOADS[*]}"
 echo "[INFO] READ_RANDOM_EXP_RANGES=${READ_RANDOM_EXP_RANGES[*]}"
 echo "[INFO] CACHE_SIZES=${CACHE_SIZES[*]}"
@@ -361,7 +387,9 @@ for db_idx in "${!DB_PATHS[@]}"; do
   DB_PATH="${DB_PATHS[$db_idx]}"
   DB_LABEL="${DB_LABELS[$db_idx]}"
   NUM="${NUMS[$db_idx]}"
-  echo "[INFO] db=$DB_LABEL path=$DB_PATH num=$NUM"
+  KEY_SIZE="${KEY_SIZES[$db_idx]}"
+  VALUE_SIZE="${VALUE_SIZES[$db_idx]}"
+  echo "[INFO] db=$DB_LABEL path=$DB_PATH num=$NUM key_size=$KEY_SIZE value_size=$VALUE_SIZE"
   for workload in "${WORKLOADS[@]}"; do
     DURATION_SEC="$(workload_duration "$workload")"
     echo "[INFO] workload=$workload duration=$DURATION_SEC"
